@@ -1,0 +1,1206 @@
+package com.alananasss.kittytune.ui.library
+
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.lifecycle.viewModelScope
+import com.alananasss.kittytune.core.AndroidViewModel
+import com.alananasss.kittytune.core.Application
+import com.alananasss.kittytune.core.str
+import com.alananasss.kittytune.data.DownloadManager
+import com.alananasss.kittytune.data.LikeRepository
+import com.alananasss.kittytune.data.MusicManager
+import com.alananasss.kittytune.data.SessionManager
+import com.alananasss.kittytune.data.TokenManager
+import com.alananasss.kittytune.data.local.AppDatabase
+import com.alananasss.kittytune.data.local.LibraryFolder
+import com.alananasss.kittytune.data.local.LibraryItemMeta
+import com.alananasss.kittytune.data.local.LocalArtist
+import com.alananasss.kittytune.data.local.LocalPlaylist
+import com.alananasss.kittytune.data.local.PlayerPreferences
+import com.alananasss.kittytune.data.network.RetrofitClient
+import com.alananasss.kittytune.domain.Playlist
+import com.alananasss.kittytune.domain.Track
+import com.alananasss.kittytune.domain.User
+import com.alananasss.kittytune.utils.Logger
+import com.alananasss.kittytune.utils.NetworkUtils
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Locale
+
+sealed class LibraryItem(open val timestamp: Long, open val key: String, open val isPinned: Boolean = false) {
+    data class FolderItem(
+        val folder: LibraryFolder,
+        val playlistCount: Int,
+        val folderCount: Int,
+        override val timestamp: Long = folder.createdAt,
+        override val key: String = "folder_${folder.id}",
+        override val isPinned: Boolean = folder.isPinned
+    ) : LibraryItem(timestamp, key, isPinned)
+
+    data class PlaylistItem(
+        val playlist: Playlist,
+        override val timestamp: Long,
+        override val key: String = getPlaylistCanonicalKey(playlist),
+        override val isPinned: Boolean = false
+    ) : LibraryItem(timestamp, key, isPinned)
+
+    data class ArtistItem(
+        val artist: LocalArtist,
+        override val timestamp: Long,
+        override val key: String = "artist_${artist.id}",
+        override val isPinned: Boolean = false
+    ) : LibraryItem(timestamp, key, isPinned)
+
+    companion object {
+        fun getPlaylistCanonicalKey(playlist: Playlist): String {
+            val permalink = playlist.permalinkUrl
+            return if (permalink != null && permalink.startsWith("yt_radio:")) {
+                "yt_radio:$permalink"
+            } else if (playlist.urn?.startsWith("soundcloud:system-playlists:") == true) {
+                "system_playlist:${playlist.urn}"
+            } else {
+                if (playlist.id < 0) "local_playlist:${playlist.id}" else "playlist_${playlist.id}"
+            }
+        }
+    }
+}
+
+class LibraryViewModel(application: Application) : AndroidViewModel(application) {
+
+    private val app = application
+    private val prefs = com.alananasss.kittytune.core.NamedPrefs("library_prefs")
+    private val tokenManager = TokenManager
+
+    var userProfile by mutableStateOf<User?>(null)
+    val likedTracks = mutableStateListOf<Track>()
+    val uploadedTracks = mutableStateListOf<Track>()
+
+    private var onlineItemsCache = listOf<LibraryItem>()
+    private var localItemsCache = listOf<LibraryItem>()
+    private var savedArtistsCache = listOf<LibraryItem>()
+    private var allFoldersCache = listOf<LibraryFolder>()
+    private val _allItemMetas = MutableStateFlow<Map<String, LibraryItemMeta>>(emptyMap())
+    val allItemMetas = _allItemMetas.asStateFlow()
+    private var allItemMetasCache: Map<String, LibraryItemMeta>
+        get() = _allItemMetas.value
+        set(value) { _allItemMetas.value = value }
+
+    private val _allItems = mutableStateListOf<LibraryItem>()
+
+    var currentFolderId by mutableStateOf<Long?>(null)
+
+    val currentFolder: LibraryFolder?
+        get() = currentFolderId?.let { id -> allFoldersCache.find { it.id == id } }
+
+    private val _folderStack = mutableStateListOf<Long>()
+    val folderStack: List<Long> get() = _folderStack
+
+    fun navigateToFolder(folder: LibraryFolder) {
+        _folderStack.add(folder.id)
+        currentFolderId = folder.id
+    }
+
+    fun navigateUp(): Boolean {
+        if (_folderStack.isNotEmpty()) {
+            _folderStack.removeAt(_folderStack.size - 1)
+            currentFolderId = _folderStack.lastOrNull()
+            return true
+        }
+        if (currentFolderId != null) {
+            currentFolderId = null
+            return true
+        }
+        return false
+    }
+
+    fun navigateToRoot() {
+        _folderStack.clear()
+        currentFolderId = null
+    }
+
+    // Batch management
+    var isBatchSelecting by mutableStateOf(false)
+    val selectedBatchKeys = mutableStateListOf<String>()
+
+    fun toggleBatchSelect(key: String) {
+        if (selectedBatchKeys.contains(key)) {
+            selectedBatchKeys.remove(key)
+            if (selectedBatchKeys.isEmpty()) {
+                isBatchSelecting = false
+            }
+        } else {
+            selectedBatchKeys.add(key)
+            isBatchSelecting = true
+        }
+    }
+
+    fun selectAllBatch() {
+        selectedBatchKeys.clear()
+        selectedBatchKeys.addAll(displayedItems.map { it.key })
+        isBatchSelecting = true
+    }
+
+    fun clearBatchSelection() {
+        selectedBatchKeys.clear()
+        isBatchSelecting = false
+    }
+
+    fun batchMoveToFolder(targetFolderId: Long?) {
+        val keys = selectedBatchKeys.toList()
+        viewModelScope.launch {
+            for (key in keys) {
+                if (key.startsWith("folder_")) {
+                    val fId = key.removePrefix("folder_").toLongOrNull()
+                    if (fId != null) {
+                        moveFolderToFolder(fId, targetFolderId)
+                    }
+                } else {
+                    moveItemToFolder(key, targetFolderId)
+                }
+            }
+            clearBatchSelection()
+        }
+    }
+
+    val displayedItems: List<LibraryItem>
+        get() {
+            val playlistsLabel = str("lib_playlists")
+            val albumsLabel = str("lib_albums")
+            val artistsLabel = str("lib_artists")
+            val stationsLabel = str("lib_stations")
+
+            val items = _allItems.filter { item ->
+                when (item) {
+                    is LibraryItem.FolderItem -> {
+                        val matchesFolder = if (searchQuery.isNotBlank()) true else item.folder.parentFolderId == currentFolderId
+                        val matchesSearch = if (searchQuery.isBlank()) true else {
+                            item.folder.name.contains(searchQuery, ignoreCase = true)
+                        }
+                        val matchesType = selectedFilter == null || selectedFilter == playlistsLabel
+                        matchesFolder && matchesSearch && matchesType
+                    }
+                    is LibraryItem.PlaylistItem -> {
+                        val meta = allItemMetasCache[item.key]
+                        val matchesFolder = if (searchQuery.isNotBlank()) true else meta?.folderId == currentFolderId
+                        val matchesSearch = if (searchQuery.isBlank()) true else {
+                            item.playlist.title?.contains(searchQuery, ignoreCase = true) == true ||
+                                    item.playlist.user?.username?.contains(searchQuery, ignoreCase = true) == true
+                        }
+                        val isAlbum = item.playlist.isRealAlbum
+                        val isStation = item.playlist.permalinkUrl?.let {
+                            it.contains("artist-stations") || it.contains("track-stations")
+                        } == true
+                        val matchesType = when (selectedFilter) {
+                            playlistsLabel -> !isAlbum && !isStation
+                            albumsLabel -> isAlbum && !isStation
+                            stationsLabel -> isStation
+                            null -> !isStation
+                            else -> false
+                        }
+                        val matchesOwnership = if (matchesType && !isStation) {
+                            when (ownershipFilter) {
+                                OwnershipFilter.ALL -> true
+                                OwnershipFilter.CREATED -> item.playlist.user?.id == userProfile?.id || item.playlist.user?.id == 0L || item.playlist.id < 0L
+                                OwnershipFilter.LIKED -> LikeRepository.isPlaylistLiked(item.playlist.id)
+                            }
+                        } else true
+                        matchesFolder && matchesSearch && matchesType && matchesOwnership
+                    }
+                    is LibraryItem.ArtistItem -> {
+                        val matchesFolder = if (searchQuery.isNotBlank()) true else currentFolderId == null
+                        val matchesSearch = if (searchQuery.isBlank()) true else {
+                            item.artist.username.contains(searchQuery, ignoreCase = true)
+                        }
+                        val matchesType = selectedFilter == artistsLabel || (selectedFilter == null && searchQuery.isNotBlank())
+                        matchesFolder && matchesSearch && matchesType
+                    }
+                }
+            }
+
+            val sorted = when (sortOption) {
+                LibrarySortOption.RECENTS -> {
+                    if (isSortDescending) items.sortedByDescending { it.timestamp } else items.sortedBy { it.timestamp }
+                }
+                LibrarySortOption.DATE_ADDED -> {
+                    if (isSortDescending) items.sortedByDescending { it.timestamp } else items.sortedBy { it.timestamp }
+                }
+                LibrarySortOption.ALPHABETICAL -> {
+                    items.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { item ->
+                        when (item) {
+                            is LibraryItem.FolderItem -> item.folder.name
+                            is LibraryItem.PlaylistItem -> item.playlist.title.orEmpty()
+                            is LibraryItem.ArtistItem -> item.artist.username
+                        }
+                    })
+                }
+                LibrarySortOption.CREATOR -> {
+                    items.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { item ->
+                        when (item) {
+                            is LibraryItem.FolderItem -> userProfile?.username.orEmpty()
+                            is LibraryItem.PlaylistItem -> item.playlist.user?.username.orEmpty()
+                            is LibraryItem.ArtistItem -> item.artist.username
+                        }
+                    })
+                }
+            }
+
+            // When at root level, pinned items sort to top!
+            return if (currentFolderId == null) {
+                val pinned = sorted.filter { it.isPinned }
+                val unpinned = sorted.filter { !it.isPinned }
+                pinned + unpinned
+            } else {
+                sorted
+            }
+        }
+
+    // --- state variables ---
+    var isLoading by mutableStateOf(false)
+    var isOfflineMode by mutableStateOf(false)
+    var searchQuery by mutableStateOf("")
+    var isGuestUser by mutableStateOf(false)
+    var showLocalMedia by mutableStateOf(false)
+    val isSyncing = LikeRepository.isSyncing
+    var selectedFilter by mutableStateOf<String?>(null)
+    var ownershipFilter by mutableStateOf(OwnershipFilter.ALL)
+    var isGridLayout by mutableStateOf(prefs.getBoolean("is_grid_layout", true))
+    var isSortDescending by mutableStateOf(true)
+    var sortOption by mutableStateOf(
+        try {
+            LibrarySortOption.valueOf(prefs.getString("library_sort_option", LibrarySortOption.RECENTS.name) ?: LibrarySortOption.RECENTS.name)
+        } catch (e: Exception) {
+            LibrarySortOption.RECENTS
+        }
+    )
+    var uploadsSortOption by mutableStateOf(
+        try {
+            UploadsSortOption.valueOf(
+                prefs.getString("uploads_sort_option", UploadsSortOption.RECENTLY_ADDED.name) ?: UploadsSortOption.RECENTLY_ADDED.name
+            )
+        } catch (e: Exception) {
+            UploadsSortOption.RECENTLY_ADDED
+        }
+    )
+    var uploadsPrivacyFilter by mutableStateOf(
+        try {
+            UploadsPrivacyFilter.valueOf(
+                prefs.getString("uploads_privacy_filter", UploadsPrivacyFilter.ALL.name) ?: UploadsPrivacyFilter.ALL.name
+            )
+        } catch (e: Exception) {
+            UploadsPrivacyFilter.ALL
+        }
+    )
+
+    // --- sidebar layout state (desktop) ---
+    var viewMode by mutableStateOf(
+        runCatching { LibraryViewMode.valueOf(prefs.getString("lib_view_mode", null) ?: "") }
+            .getOrDefault(LibraryViewMode.LIST)
+    )
+    var sidebarWidth by mutableStateOf(
+        prefs.getInt("sidebar_width", SIDEBAR_DEFAULT_WIDTH.toInt()).toFloat()
+            .coerceIn(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH)
+    )
+    var isSidebarCollapsed by mutableStateOf(prefs.getBoolean("sidebar_collapsed", false))
+
+    var isLibraryFullScreen by mutableStateOf(false)
+    var isCreatingPlaylist by mutableStateOf(false)
+
+    var openSidebarPopupCount by mutableStateOf(0)
+    val isSidebarPopupOpen: Boolean get() = openSidebarPopupCount > 0
+
+    fun registerSidebarPopup() {
+        openSidebarPopupCount++
+    }
+
+    fun unregisterSidebarPopup() {
+        openSidebarPopupCount = (openSidebarPopupCount - 1).coerceAtLeast(0)
+    }
+
+    private var sidebarDragRaw = 0f
+
+    fun sidebarDragStart(isHoverExpanded: Boolean = false) {
+        sidebarDragRaw = if (isSidebarCollapsed && !isHoverExpanded) SIDEBAR_COLLAPSED_WIDTH else sidebarWidth
+    }
+
+    fun sidebarDragBy(deltaDp: Float, isHoverExpanded: Boolean = false) {
+        sidebarDragRaw = (sidebarDragRaw + deltaDp).coerceIn(0f, SIDEBAR_MAX_WIDTH)
+        if (sidebarDragRaw < SIDEBAR_SNAP_THRESHOLD) {
+            isSidebarCollapsed = true
+        } else {
+            if (!isHoverExpanded) {
+                isSidebarCollapsed = false
+            }
+            sidebarWidth = sidebarDragRaw.coerceIn(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH)
+        }
+    }
+
+    fun sidebarDragEnd(keepCollapsed: Boolean = false) {
+        prefs.putInt("sidebar_width", sidebarWidth.toInt())
+        if (keepCollapsed && sidebarDragRaw >= SIDEBAR_SNAP_THRESHOLD) {
+            isSidebarCollapsed = true
+            prefs.putBoolean("sidebar_collapsed", true)
+        } else {
+            prefs.putBoolean("sidebar_collapsed", isSidebarCollapsed)
+        }
+    }
+
+    fun toggleSidebarCollapsed() {
+        isSidebarCollapsed = !isSidebarCollapsed
+        prefs.putBoolean("sidebar_collapsed", isSidebarCollapsed)
+    }
+
+    fun collapseSidebar() {
+        isSidebarCollapsed = true
+        prefs.putBoolean("sidebar_collapsed", true)
+    }
+
+    fun expandSidebar() {
+        isSidebarCollapsed = false
+        prefs.putBoolean("sidebar_collapsed", false)
+    }
+
+    fun createPlaylist(title: String, isPublic: Boolean, onCreated: (Long) -> Unit = {}) {
+        val name = title.trim()
+        if (name.isEmpty() || isCreatingPlaylist) return
+        viewModelScope.launch {
+            isCreatingPlaylist = true
+            try {
+                val id = DownloadManager.createUserPlaylist(name, isPublic)
+                com.alananasss.kittytune.core.Toaster.show(str("lib_playlist_created"))
+                onCreated(id)
+            } catch (e: Exception) {
+                e.printStackTrace()
+                com.alananasss.kittytune.core.Toaster.show(str("lib_playlist_create_failed"))
+            } finally {
+                isCreatingPlaylist = false
+            }
+        }
+    }
+
+    fun createFolder(name: String, parentFolderId: Long? = currentFolderId, itemToMoveKey: String? = null, folderToMoveId: Long? = null) {
+        if (name.isBlank()) return
+        viewModelScope.launch {
+            val newFolder = LibraryFolder(
+                name = name.trim(),
+                parentFolderId = parentFolderId
+            )
+            val newFolderId = folderDao.insertFolder(newFolder)
+            if (itemToMoveKey != null) {
+                moveItemToFolder(itemToMoveKey, newFolderId)
+            }
+            if (folderToMoveId != null) {
+                moveFolderToFolder(folderToMoveId, newFolderId)
+            }
+        }
+    }
+
+    fun renameFolder(folderId: Long, newName: String) {
+        if (newName.isBlank()) return
+        viewModelScope.launch {
+            folderDao.renameFolder(folderId, newName.trim())
+        }
+    }
+
+    fun deleteFolder(folder: LibraryFolder) {
+        viewModelScope.launch {
+            folderDao.deleteFolderSafely(folder.id)
+            if (currentFolderId == folder.id) {
+                navigateUp()
+            }
+        }
+    }
+
+    fun isItemPinned(itemKey: String, defaultPinned: Boolean = false): Boolean {
+        return allItemMetasCache[itemKey]?.isPinned ?: defaultPinned
+    }
+
+    fun togglePinItem(itemKey: String, defaultPinned: Boolean = false) {
+        viewModelScope.launch {
+            val currentMeta = allItemMetasCache[itemKey]
+            val currentPinned = currentMeta?.isPinned ?: defaultPinned
+            val newPinned = !currentPinned
+            folderDao.upsertItemMeta(
+                LibraryItemMeta(
+                    itemKey = itemKey,
+                    folderId = currentMeta?.folderId,
+                    isPinned = newPinned
+                )
+            )
+        }
+    }
+
+    fun togglePinFolder(folderId: Long) {
+        viewModelScope.launch {
+            val folder = allFoldersCache.find { it.id == folderId } ?: return@launch
+            val newPinned = !folder.isPinned
+            folderDao.setFolderPinned(folderId, newPinned)
+        }
+    }
+
+    fun moveItemToFolder(itemKey: String, targetFolderId: Long?) {
+        viewModelScope.launch {
+            folderDao.upsertItemMeta(
+                LibraryItemMeta(
+                    itemKey = itemKey,
+                    folderId = targetFolderId,
+                    isPinned = false
+                )
+            )
+        }
+    }
+
+    fun moveFolderToFolder(folderId: Long, targetFolderId: Long?) {
+        if (folderId == targetFolderId) return
+        viewModelScope.launch {
+            folderDao.moveFolder(folderId, targetFolderId)
+        }
+    }
+
+    fun getAvailableTargetFolders(movingFolderId: Long?): List<LibraryFolder> {
+        return allFoldersCache.filter { folder ->
+            folder.parentFolderId == currentFolderId && (movingFolderId == null || folder.id != movingFolderId)
+        }
+    }
+
+    fun getAllPlaylistsInFolder(folderId: Long, recursive: Boolean = false): List<Playlist> {
+        if (!recursive) {
+            return _allItems.filterIsInstance<LibraryItem.PlaylistItem>().filter { item ->
+                allItemMetasCache[item.key]?.folderId == folderId
+            }.map { it.playlist }
+        }
+        val targetFolderIds = mutableSetOf(folderId)
+        val queue = ArrayDeque<Long>()
+        queue.add(folderId)
+        while (queue.isNotEmpty()) {
+            val parentId = queue.removeFirst()
+            val subFolders = allFoldersCache.filter { it.parentFolderId == parentId }
+            for (sub in subFolders) {
+                if (targetFolderIds.add(sub.id)) {
+                    queue.add(sub.id)
+                }
+            }
+        }
+        return _allItems.filterIsInstance<LibraryItem.PlaylistItem>().filter { item ->
+            val fId = allItemMetasCache[item.key]?.folderId
+            fId != null && targetFolderIds.contains(fId)
+        }.map { it.playlist }
+    }
+
+    fun playFolder(
+        folderId: Long,
+        playerViewModel: com.alananasss.kittytune.ui.player.PlayerViewModel,
+        shuffle: Boolean = false,
+        recursive: Boolean = false
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val playlists = getAllPlaylistsInFolder(folderId, recursive = recursive)
+            val allTracks = mutableListOf<Track>()
+            playlists.forEach { playlist ->
+                val tracks = playlist.tracks
+                if (!tracks.isNullOrEmpty()) {
+                    allTracks.addAll(tracks)
+                } else {
+                    val localTracks = db.getTracksForPlaylist(playlist.id).first()
+                    if (localTracks.isNotEmpty()) {
+                        allTracks.addAll(localTracks.map { local ->
+                            Track(
+                                id = local.id,
+                                title = local.title,
+                                user = User(0, local.artist, null),
+                                artworkUrl = local.artworkUrl,
+                                durationMs = local.duration
+                            )
+                        })
+                    } else if (playlist.id > 0) {
+                        try {
+                            val online = RetrofitClient.create().getPlaylist(playlist.id)
+                            if (!online.tracks.isNullOrEmpty()) {
+                                allTracks.addAll(online.tracks!!)
+                            }
+                        } catch (e: Exception) {
+                            Logger.e("LibraryVM", "Failed to load online playlist ${playlist.id}", e)
+                        }
+                    }
+                }
+            }
+            if (allTracks.isNotEmpty()) {
+                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                    val finalTracks = if (shuffle) allTracks.shuffled() else allTracks
+                    playerViewModel.playPlaylist(finalTracks, 0)
+                }
+            }
+        }
+    }
+
+    private var isHydratingLikes = false
+    private fun parseIsoDate(raw: String?): Long {
+        if (raw.isNullOrBlank()) return 0L
+        return runCatching { java.time.Instant.parse(raw).toEpochMilli() }.getOrNull()
+            ?: runCatching { java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US).apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }.parse(raw)?.time }.getOrNull()
+            ?: runCatching { java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US).apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }.parse(raw)?.time }.getOrNull()
+            ?: runCatching { java.text.SimpleDateFormat("yyyy/MM/dd HH:mm:ss Z", java.util.Locale.US).parse(raw)?.time }.getOrNull()
+            ?: runCatching { java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).parse(raw)?.time }.getOrNull()
+            ?: 0L
+    }
+
+    private val api = RetrofitClient.create()
+    private val db = AppDatabase.downloadDao
+    private val folderDao = AppDatabase.folderDao
+
+    init {
+        val playerPrefs = PlayerPreferences()
+        val cached = playerPrefs.getCachedUserUploads()
+        if (cached.isNotEmpty()) {
+            uploadedTracks.clear()
+            uploadedTracks.addAll(cached)
+        }
+
+        viewModelScope.launch {
+            snapshotFlow { isGridLayout }.collect { isGrid ->
+                prefs.putBoolean("is_grid_layout", isGrid)
+            }
+        }
+
+        viewModelScope.launch {
+            snapshotFlow { viewMode }.collect { mode ->
+                prefs.putString("lib_view_mode", mode.name)
+            }
+        }
+
+        viewModelScope.launch {
+            snapshotFlow { sortOption }.collect { opt ->
+                prefs.putString("library_sort_option", opt.name)
+            }
+        }
+
+        viewModelScope.launch {
+            snapshotFlow { uploadsSortOption }.collect { opt ->
+                prefs.putString("uploads_sort_option", opt.name)
+            }
+        }
+
+        viewModelScope.launch {
+            snapshotFlow { uploadsPrivacyFilter }.collect { filter ->
+                prefs.putString("uploads_privacy_filter", filter.name)
+            }
+        }
+
+        viewModelScope.launch {
+            LikeRepository.likedTracks.collect { tracksFromRepo ->
+                likedTracks.clear()
+                likedTracks.addAll(tracksFromRepo)
+            }
+        }
+
+        viewModelScope.launch {
+            LikeRepository.likedPlaylists.collect {
+                rebuildAllItems()
+            }
+        }
+
+        viewModelScope.launch {
+            SessionManager.isClientIdValid.collect { isReady ->
+                if (isReady && userProfile == null) {
+                    loadData()
+                }
+            }
+        }
+
+        viewModelScope.launch {
+            SessionManager.sessionReadyEvent.collect {
+                loadData(forceRefresh = true)
+            }
+        }
+
+        viewModelScope.launch {
+            DownloadManager.libraryUpdated.collect {
+                rebuildAllItems()
+            }
+        }
+
+        viewModelScope.launch {
+            MusicManager.trackUpdatedFlow.collect { updatedTrack ->
+                val idx = uploadedTracks.indexOfFirst { it.id == updatedTrack.id }
+                if (idx != -1) {
+                    uploadedTracks[idx] = updatedTrack
+                    playerPrefs.setCachedUserUploads(uploadedTracks.toList())
+                }
+            }
+        }
+
+        viewModelScope.launch {
+            MusicManager.trackDeletedFlow.collect { deletedTrackId ->
+                val idx = uploadedTracks.indexOfFirst { it.id == deletedTrackId }
+                if (idx != -1) {
+                    uploadedTracks.removeAt(idx)
+                    playerPrefs.setCachedUserUploads(uploadedTracks.toList())
+                }
+            }
+        }
+
+        viewModelScope.launch {
+            DownloadManager.deletedPlaylistIds.collect {
+                rebuildAllItems()
+            }
+        }
+
+        viewModelScope.launch {
+            folderDao.getAllFolders().collect { folders ->
+                allFoldersCache = folders
+                rebuildAllItems()
+            }
+        }
+
+        viewModelScope.launch {
+            folderDao.getAllItemMetas().collect { metas ->
+                allItemMetasCache = metas.associateBy { it.itemKey }
+                rebuildAllItems()
+            }
+        }
+
+        viewModelScope.launch {
+            combine(
+                db.getAllPlaylists(),
+                LikeRepository.likedPlaylists,
+                DownloadManager.deletedPlaylistIds
+            ) { allLocalPlaylists, likedIds, deletedIds ->
+                allLocalPlaylists.filter { local ->
+                    !deletedIds.contains(local.id) && (local.id < 0 || local.isUserCreated || !local.localCoverPath.isNullOrEmpty() || local.isDownloaded || likedIds.contains(local.id) || local.permalinkUrl?.contains("spotify") == true)
+                }
+            }.collect { localPlaylists ->
+                val localIds = localPlaylists.map { it.id }.toSet()
+                if (DownloadManager.deletedPlaylistIds.value.any { localIds.contains(it) }) {
+                    DownloadManager.clearDeletedPlaylistIds(localIds)
+                }
+                localItemsCache = localPlaylists.map { local ->
+                    val localCoverFile = java.io.File(com.alananasss.kittytune.core.AppDirs.imageCacheDir, "playlist_cover_${local.id}.jpg")
+                    val effectiveCover = local.localCoverPath ?: if (localCoverFile.exists()) localCoverFile.absolutePath else null
+                    val rawArt = if (!effectiveCover.isNullOrEmpty()) effectiveCover else local.artworkUrl
+                    val validArt = if (rawArt?.contains("avatars") == true) {
+                        if (!effectiveCover.isNullOrEmpty()) effectiveCover else ""
+                    } else (rawArt ?: "")
+                    val finalArtwork = if (validArt.isNotEmpty()) {
+                        validArt
+                    } else {
+                        db.getTracksForPlaylistSync(local.id).firstOrNull { it.localArtworkPath.isNotEmpty() || (it.artworkUrl.isNotEmpty() && !it.artworkUrl.contains("avatars")) }?.let {
+                            if (it.localArtworkPath.isNotEmpty()) it.localArtworkPath else it.artworkUrl
+                        } ?: ""
+                    }
+                    val p = Playlist(
+                        id = local.id,
+                        title = local.title,
+                        artworkUrl = finalArtwork,
+                        calculatedArtworkUrl = null,
+                        trackCount = local.trackCount,
+                        user = User(0, local.artist, null),
+                        tracks = null,
+                        isAlbum = local.isAlbum,
+                        permalinkUrl = local.permalinkUrl
+                    )
+
+                    val key = LibraryItem.getPlaylistCanonicalKey(p)
+                    val meta = allItemMetasCache[key]
+                    val isPinned = if (meta?.folderId == null) (meta?.isPinned == true) else false
+                    LibraryItem.PlaylistItem(p, local.addedAt, key, isPinned)
+                }
+                rebuildAllItems()
+            }
+        }
+
+        viewModelScope.launch {
+            DownloadManager.getSavedArtists().collect { artists ->
+                savedArtistsCache = artists.map { LibraryItem.ArtistItem(it, it.savedAt, "artist_${it.id}", false) }
+                rebuildAllItems()
+            }
+        }
+    }
+
+    private fun rebuildAllItems() {
+        val deletedIds = DownloadManager.deletedPlaylistIds.value
+        val localIds = localItemsCache
+            .filterIsInstance<LibraryItem.PlaylistItem>()
+            .map { it.playlist.id }
+            .toSet()
+
+        val onlinePlaylistMap = onlineItemsCache
+            .filterIsInstance<LibraryItem.PlaylistItem>()
+            .associateBy { it.playlist.id }
+
+        val updatedOnlineItems = onlineItemsCache.map { item ->
+            if (item is LibraryItem.PlaylistItem) {
+                val meta = allItemMetasCache[item.key]
+                val isPinned = if (meta?.folderId == null) (meta?.isPinned == true) else false
+                item.copy(isPinned = isPinned)
+            } else item
+        }
+
+        val updatedLocalItems = localItemsCache.map { item ->
+            if (item is LibraryItem.PlaylistItem) {
+                val meta = allItemMetasCache[item.key]
+                val isPinned = if (meta?.folderId == null) (meta?.isPinned == true) else false
+                val onlinePl = onlinePlaylistMap[item.playlist.id]?.playlist
+                val fixedPl = if (onlinePl != null && onlinePl.isRealAlbum && !item.playlist.isRealAlbum) {
+                    item.playlist.copy(
+                        isAlbum = true,
+                        setType = onlinePl.setType,
+                        playlistType = onlinePl.playlistType
+                    )
+                } else item.playlist
+                item.copy(playlist = fixedPl, isPinned = isPinned)
+            } else item
+        }
+
+        val filteredOnlineItems = updatedOnlineItems.filter { item ->
+            if (item is LibraryItem.PlaylistItem) !localIds.contains(item.playlist.id) && !deletedIds.contains(item.playlist.id) else true
+        }
+
+        val filteredLocalItems = updatedLocalItems.filter { item ->
+            if (item is LibraryItem.PlaylistItem) !deletedIds.contains(item.playlist.id) else true
+        }
+
+        // Build folder items with playlist and folder counts
+        val folderItems = allFoldersCache.map { folder ->
+            val childPlaylistsCount = (filteredOnlineItems + filteredLocalItems).count { item ->
+                if (item is LibraryItem.PlaylistItem) {
+                    allItemMetasCache[item.key]?.folderId == folder.id
+                } else false
+            }
+            val childFoldersCount = allFoldersCache.count { it.parentFolderId == folder.id }
+            val isPinned = if (folder.parentFolderId == null) folder.isPinned else false
+            LibraryItem.FolderItem(
+                folder = folder,
+                playlistCount = childPlaylistsCount,
+                folderCount = childFoldersCount,
+                timestamp = folder.createdAt,
+                key = "folder_${folder.id}",
+                isPinned = isPinned
+            )
+        }
+
+        _allItems.clear()
+        _allItems.addAll(folderItems)
+        _allItems.addAll(filteredOnlineItems)
+        _allItems.addAll(filteredLocalItems)
+        _allItems.addAll(savedArtistsCache)
+    }
+
+    private var loadJob: Job? = null
+
+    fun loadData(forceRefresh: Boolean = false) {
+        if (!forceRefresh && userProfile != null) return
+        if (loadJob?.isActive == true && !forceRefresh) return
+
+        val playerPrefs = PlayerPreferences()
+        showLocalMedia = playerPrefs.getLocalMediaEnabled()
+
+        isGuestUser = tokenManager.isGuestMode()
+        val token = tokenManager.getAccessToken()
+        if (!isGuestUser && token.isNullOrEmpty()) {
+            isLoading = false
+            return
+        }
+
+        if (isGuestUser) {
+            userProfile = User(0, str("guest_user"), null)
+            uploadedTracks.clear()
+            isOfflineMode = false
+            isLoading = false
+            return
+        }
+
+        loadJob?.cancel()
+        loadJob = viewModelScope.launch {
+            isLoading = true
+            if (NetworkUtils.isInternetAvailable()) {
+                try {
+                    isOfflineMode = false
+                    val user = userProfile ?: api.getMe()
+                    userProfile = user
+                    val pPrefs = com.alananasss.kittytune.data.local.PlayerPreferences()
+                    pPrefs.setCachedUserId(user.id)
+                    pPrefs.setCachedUsername(user.username)
+                    loadOnlineData(user)
+                } catch (e: Exception) {
+                    println("online error or not connected: ${e.message}")
+                    isLoading = false
+                }
+            } else {
+                isOfflineMode = true
+                isLoading = false
+            }
+        }
+    }
+
+    private fun loadOnlineData(user: User) {
+        viewModelScope.launch {
+            DownloadManager.refreshFollowings()
+            try {
+                coroutineScope {
+                    val likedPlaylistsDeferred = async {
+                        val allLiked = mutableListOf<com.alananasss.kittytune.domain.PlaylistLikeItem>()
+                        try {
+                            var resp = api.getUserPlaylistLikes(user.id, limit = 200)
+                            allLiked.addAll(resp.collection)
+                            while (!resp.next_href.isNullOrEmpty()) {
+                                resp = api.getPlaylistLikesNextPage(resp.next_href!!)
+                                allLiked.addAll(resp.collection)
+                            }
+                        } catch (e: Exception) {
+                            Logger.e("LibraryVM", "Failed to fetch playlist likes", e)
+                        }
+                        allLiked
+                    }
+                    val createdPlaylistsDeferred = async {
+                        val allCreated = mutableListOf<Playlist>()
+                        try {
+                            var resp = api.getUserCreatedPlaylists(user.id, limit = 200)
+                            allCreated.addAll(resp.collection)
+                            while (!resp.next_href.isNullOrEmpty()) {
+                                resp = api.getSearchPlaylistsNextPage(resp.next_href!!)
+                                allCreated.addAll(resp.collection)
+                            }
+                        } catch (e: Exception) {
+                            Logger.e("LibraryVM", "Failed to fetch created playlists", e)
+                        }
+                        allCreated
+                    }
+                    val repostedPlaylistsDeferred = async { api.getMyPlaylistPosts() }
+                    val libraryAllDeferred = async { try { api.getMyLibraryAll(limit = 200) } catch (e: Exception) { null } }
+                    val uploadedTracksDeferred = async {
+                        val tracks = mutableListOf<Track>()
+                        try {
+                            val firstPage = api.getUserTracks(user.id, limit = 50)
+                            tracks.addAll(firstPage.collection.filterNotNull())
+                            var nextUrl = firstPage.next_href
+                            var pageCount = 0
+                            while (nextUrl != null && pageCount < 5) {
+                                val nextPage = api.getUserTracksNextPage(nextUrl)
+                                tracks.addAll(nextPage.collection.filterNotNull())
+                                nextUrl = nextPage.next_href
+                                pageCount++
+                            }
+                        } catch (e: Exception) {
+                            Logger.e("LibraryVM", "Failed to fetch uploaded tracks", e)
+                        }
+                        tracks
+                    }
+
+                    val likedResponse = likedPlaylistsDeferred.await()
+                    val createdResponse = createdPlaylistsDeferred.await()
+                    val repostedResponse = repostedPlaylistsDeferred.await()
+                    val libraryAllResponse = libraryAllDeferred.await()
+                    val uploadedResponse = uploadedTracksDeferred.await()
+
+                    val playerPrefs = PlayerPreferences()
+                    uploadedTracks.clear()
+                    uploadedTracks.addAll(uploadedResponse)
+                    playerPrefs.setCachedUserUploads(uploadedResponse)
+
+                    val newOnlineItems = mutableListOf<LibraryItem>()
+                    val addedPlaylistIds = mutableSetOf<Long>()
+                    val trulyLikedIds = mutableSetOf<Long>()
+
+                    likedResponse.forEach { item ->
+                        val pl = item.playlist
+                        val sp = item.systemPlaylist
+
+                        if (pl != null && addedPlaylistIds.add(pl.id)) {
+                            trulyLikedIds.add(pl.id)
+                            val date = parseIsoDate(item.likedAt)
+                            val localCoverFile = java.io.File(com.alananasss.kittytune.core.AppDirs.imageCacheDir, "playlist_cover_${pl.id}.jpg")
+                            val localInDb = try { db.getPlaylist(pl.id) } catch (_: Exception) { null }
+                            val effectiveCover = localInDb?.localCoverPath ?: if (localCoverFile.exists()) localCoverFile.absolutePath else null
+                            val adjustedPlaylist = if (!effectiveCover.isNullOrEmpty()) {
+                                pl.copy(artworkUrl = effectiveCover)
+                            } else {
+                                pl
+                            }
+                            newOnlineItems.add(LibraryItem.PlaylistItem(adjustedPlaylist, date))
+                        } else if (sp != null) {
+                            val numId = if (sp.numericId != 0L) sp.numericId else (sp.urn?.let { kotlin.math.abs(it.hashCode().toLong()) } ?: 0L)
+                            if (numId != 0L && addedPlaylistIds.add(numId)) {
+                                trulyLikedIds.add(numId)
+                                val stationPermalink = sp.permalinkUrl ?: if (sp.isArtistStation) "https://soundcloud.com/discover/sets/artist-stations:${sp.numericId}" else "https://soundcloud.com/discover/sets/track-stations:${sp.numericId}"
+                                val fakePlaylist = Playlist(
+                                    id = numId,
+                                    title = sp.title,
+                                    artworkUrl = sp.artworkUrl,
+                                    calculatedArtworkUrl = sp.calculatedArtworkUrl,
+                                    trackCount = sp.tracks?.size,
+                                    user = sp.user,
+                                    tracks = null,
+                                    permalinkUrl = stationPermalink,
+                                    urn = sp.urn
+                                )
+                                val date = parseIsoDate(item.likedAt)
+                                newOnlineItems.add(LibraryItem.PlaylistItem(fakePlaylist, date))
+                            }
+                        }
+                    }
+
+                    createdResponse.forEach { playlist ->
+                        if (addedPlaylistIds.add(playlist.id)) {
+                            val date = parseIsoDate(playlist.lastModified ?: playlist.createdAt)
+
+                            val validCustomArt = playlist.artworkUrl?.takeIf { !it.contains("avatars") && !it.contains("default_avatar") }
+                            val validCalcArt = playlist.calculatedArtworkUrl?.takeIf { !it.contains("avatars") && !it.contains("default_avatar") }
+                            val trackArtFromTracks = playlist.tracks?.firstOrNull { 
+                                it.fullResArtwork.isNotBlank() && !it.fullResArtwork.contains("picsum") && !it.fullResArtwork.contains("avatars") 
+                            }?.fullResArtwork
+
+                            val localTrackArt = if (validCustomArt == null && validCalcArt == null && trackArtFromTracks == null) {
+                                db.getTracksForPlaylistSync(playlist.id).firstOrNull {
+                                    it.localArtworkPath.isNotEmpty() || (it.artworkUrl.isNotEmpty() && !it.artworkUrl.contains("avatars"))
+                                }?.let { if (it.localArtworkPath.isNotEmpty()) it.localArtworkPath else it.artworkUrl }
+                            } else null
+
+                            val resolvedArt = validCustomArt ?: validCalcArt ?: trackArtFromTracks ?: localTrackArt ?: ""
+
+                            val localCoverFile = java.io.File(com.alananasss.kittytune.core.AppDirs.imageCacheDir, "playlist_cover_${playlist.id}.jpg")
+                            val localInDb = try { db.getPlaylist(playlist.id) } catch (_: Exception) { null }
+                            val effectiveCover = localInDb?.localCoverPath ?: if (localCoverFile.exists()) localCoverFile.absolutePath else null
+
+                            val plForDisplay = playlist.copy(
+                                artworkUrl = effectiveCover ?: resolvedArt.ifEmpty { null },
+                                calculatedArtworkUrl = null,
+                                user = playlist.user?.copy(avatarUrl = null)
+                            )
+                            newOnlineItems.add(LibraryItem.PlaylistItem(plForDisplay, date))
+                        }
+                    }
+
+                    launch(Dispatchers.IO) {
+                        createdResponse.forEach { playlist ->
+                            try {
+                                val localInDb = db.getPlaylist(playlist.id)
+                                if (localInDb == null) {
+                                    db.insertPlaylist(
+                                        LocalPlaylist(
+                                            id = playlist.id,
+                                            title = playlist.title ?: str("untitled_track"),
+                                            artist = playlist.user?.username ?: user.username ?: str("unknown_artist"),
+                                            artworkUrl = playlist.fullResArtwork,
+                                            localCoverPath = null,
+                                            trackCount = playlist.trackCount ?: playlist.tracks?.size ?: 0,
+                                            isUserCreated = true,
+                                            permalinkUrl = playlist.permalinkUrl,
+                                            isAlbum = playlist.isRealAlbum,
+                                            isDownloaded = false
+                                        )
+                                    )
+                                } else if (!localInDb.isUserCreated) {
+                                    db.updatePlaylist(localInDb.copy(isUserCreated = true))
+                                }
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                            }
+                        }
+                    }
+
+                    repostedResponse.collection.forEach { item ->
+                        val playlist = item.playlist ?: return@forEach
+                        if (addedPlaylistIds.add(playlist.id)) {
+                            val date = parseIsoDate(playlist.lastModified ?: playlist.createdAt)
+                            val localCoverFile = java.io.File(com.alananasss.kittytune.core.AppDirs.imageCacheDir, "playlist_cover_${playlist.id}.jpg")
+                            val localInDb = try { db.getPlaylist(playlist.id) } catch (_: Exception) { null }
+                            val effectiveCover = localInDb?.localCoverPath ?: if (localCoverFile.exists()) localCoverFile.absolutePath else null
+                            val adjustedPlaylist = if (!effectiveCover.isNullOrEmpty()) {
+                                playlist.copy(artworkUrl = effectiveCover)
+                            } else {
+                                playlist
+                            }
+                            newOnlineItems.add(LibraryItem.PlaylistItem(adjustedPlaylist, date))
+                        }
+                    }
+
+                    // Add liked system playlists and stations from library/all
+                    libraryAllResponse?.collection?.forEach { item ->
+                        val sp = item.systemPlaylist ?: return@forEach
+                        val numId = if (sp.numericId != 0L) sp.numericId else (sp.urn?.let { kotlin.math.abs(it.hashCode().toLong()) } ?: 0L)
+                        if (numId != 0L && addedPlaylistIds.add(numId)) {
+                            trulyLikedIds.add(numId)
+                            val stationPermalink = sp.permalinkUrl ?: if (sp.isArtistStation) "https://soundcloud.com/discover/sets/artist-stations:${sp.numericId}" else "https://soundcloud.com/discover/sets/track-stations:${sp.numericId}"
+                            val fakePlaylist = Playlist(
+                                id = numId,
+                                title = sp.title,
+                                artworkUrl = sp.artworkUrl,
+                                calculatedArtworkUrl = sp.calculatedArtworkUrl,
+                                trackCount = sp.tracks?.size,
+                                user = sp.user,
+                                tracks = null,
+                                permalinkUrl = stationPermalink,
+                                urn = sp.urn
+                            )
+                            val date = parseIsoDate(item.createdAt)
+                            newOnlineItems.add(LibraryItem.PlaylistItem(fakePlaylist, date))
+                        }
+                    }
+
+                    LikeRepository.setLikedPlaylists(trulyLikedIds)
+
+                    onlineItemsCache = newOnlineItems
+                    rebuildAllItems()
+
+                    if (!isHydratingLikes) {
+                        isHydratingLikes = true
+                        LikeRepository.setSyncing(true)
+
+                        launch(Dispatchers.IO) {
+                            try {
+                                // Every page of a whole library ends up in one list that is then
+                                // held for the session, so each track is shrunk as it arrives rather
+                                // than after: the peak matters as much as what is kept (issue #33).
+                                val slimmer = com.alananasss.kittytune.data.LibraryTrackSlimmer()
+                                val allCollectedLikes = mutableListOf<Track>()
+                                var nextUrl: String? = null
+                                var pages = 0
+                                var skippedEmpty = 0
+                                var failedAt: String? = null
+
+                                /**
+                                 * One page's tracks, minus the entries with nothing in them.
+                                 *
+                                 * A like whose track was deleted, made private or blocked arrives
+                                 * with no track at all. Mapping it used to dereference that null,
+                                 * and since the only `catch` sat outside the whole loop, one such
+                                 * entry ended the entire hydration: [LikeRepository.replaceAllLikes]
+                                 * was never reached and the liked list quietly stayed at whatever
+                                 * had been cached, missing everything liked since. Skipped and
+                                 * counted instead (issue #33).
+                                 */
+                                fun collect(items: List<com.alananasss.kittytune.domain.TrackLikeItem>) {
+                                    for (item in items) {
+                                        val track = item.track
+                                        if (track == null) {
+                                            skippedEmpty++
+                                            continue
+                                        }
+                                        val time = parseIsoDate(item.createdAt).takeIf { it > 0 }
+                                        allCollectedLikes.add(slimmer.slim(track.copy(likedAt = time)))
+                                    }
+                                }
+
+                                // The first page is the one failure that has to abort: with nothing
+                                // collected there is no list worth writing.
+                                val firstPage = api.getUserTrackLikes(user.id, limit = 200)
+                                collect(firstPage.collection)
+                                nextUrl = firstPage.next_href
+                                pages++
+
+                                // Every later page is isolated. A page that fails stops the walk
+                                // and keeps what came before it, rather than throwing away a
+                                // library's worth of likes because request 37 timed out.
+                                while (nextUrl != null && pages < MAX_LIKES_PAGES) {
+                                    val page = try {
+                                        api.getTrackLikesNextPage(nextUrl!!)
+                                    } catch (e: Exception) {
+                                        failedAt = e.toString()
+                                        break
+                                    }
+                                    collect(page.collection)
+                                    nextUrl = page.next_href
+                                    pages++
+                                }
+
+                                val complete = nextUrl == null && failedAt == null
+
+                                com.alananasss.kittytune.utils.Logger.e(
+                                    "LibraryViewModel",
+                                    "Hydrated ${allCollectedLikes.size} likes over $pages page(s), " +
+                                        "${slimmer.internedArtistCount} distinct artists, " +
+                                        "$skippedEmpty entry(ies) with no track" +
+                                        when {
+                                            failedAt != null -> "; stopped early on $failedAt"
+                                            nextUrl != null -> "; stopped at the $MAX_LIKES_PAGES-page ceiling, more remain"
+                                            else -> "; complete"
+                                        }
+                                )
+
+                                LikeRepository.replaceAllLikes(
+                                    allCollectedLikes,
+                                    currentUserId = user.id,
+                                    serverListComplete = complete,
+                                )
+
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                            } finally {
+                                isHydratingLikes = false
+                                isLoading = false
+                                LikeRepository.setSyncing(false)
+                            }
+                        }
+                    } else {
+                        isLoading = false
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                isLoading = false
+            }
+        }
+    }
+}
+
+enum class LibraryFilter(val stringResKey: String) {
+    PLAYLISTS("lib_playlists"),
+    ALBUMS("lib_albums"),
+    ARTISTS("lib_artists"),
+    STATIONS("lib_stations"),
+    UPLOADS("lib_your_uploads")
+}
+
+enum class OwnershipFilter { ALL, CREATED, LIKED }
+
+enum class LibrarySortOption {
+    RECENTS,
+    DATE_ADDED,
+    ALPHABETICAL,
+    CREATOR
+}
+
+enum class UploadsSortOption(val stringResKey: String) {
+    RECENTLY_ADDED("uploads_sort_recently_added"),
+    FIRST_ADDED("uploads_sort_first_added"),
+    TITLE("uploads_sort_title"),
+    ARTIST("uploads_sort_artist")
+}
+
+enum class UploadsPrivacyFilter(val stringResKey: String) {
+    ALL("uploads_filter_all"),
+    PUBLIC("uploads_filter_public"),
+    PRIVATE("uploads_filter_private")
+}
+
+/** The four sidebar display styles (compact list / list / cover grid / grid with titles). */
+enum class LibraryViewMode { COMPACT_LIST, LIST, COMPACT_GRID, GRID }
+
+// Sidebar sizing (dp) — shared between LibraryViewModel and MainScreen/Sidebar.
+const val SIDEBAR_MIN_WIDTH = 264f
+const val SIDEBAR_MAX_WIDTH = 480f
+const val SIDEBAR_DEFAULT_WIDTH = 300f
+const val SIDEBAR_COLLAPSED_WIDTH = 72f
+const val SIDEBAR_SNAP_THRESHOLD = 176f
+
+/**
+ * A ceiling on the walk through `track_likes`, in pages of 200 (issue #33).
+ *
+ * A safety net, not a feature: 40 000 liked tracks is far past any real library, and the loop that
+ * collects them had no bound at all — it kept every page in one list until the server ran out, which
+ * is a design that cannot be reasoned about and did in fact run a machine out of heap.
+ *
+ * Reaching it means some likes are missing from the list, which is why it is logged rather than
+ * silent. If anyone ever hits it, the fix is to page the library instead of raising this.
+ */
+private const val MAX_LIKES_PAGES = 200

@@ -1,0 +1,195 @@
+import com.alananasss.kittytune.audio.providers.AudioProviderOrder
+import com.alananasss.kittytune.audio.providers.AudioProviderOrderItem
+import com.alananasss.kittytune.audio.providers.ProviderIsrc
+import com.alananasss.kittytune.audio.providers.deezer.DeezerAudioProvider
+import com.alananasss.kittytune.audio.providers.deezer.DeezerAudioProxy
+import com.alananasss.kittytune.audio.providers.deezer.DeezerProxyMode
+import com.alananasss.kittytune.audio.providers.deezer.deezerCookieValue
+import com.alananasss.kittytune.audio.providers.deezer.isDeezerCookieConfigured
+import com.alananasss.kittytune.audio.providers.deezer.normalizeDeezerCookieInput
+import com.alananasss.kittytune.audio.providers.tidal.extractTidalAccessToken
+import com.alananasss.kittytune.audio.providers.tidal.extractTidalRefreshToken
+import com.alananasss.kittytune.audio.providers.tidal.isTidalCookieConfigured
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class AudioProvidersParityTest {
+
+    @Test
+    fun testAudioProviderOrderDefaultAndSerialization() {
+        val defaultList = AudioProviderOrder.Default
+        assertEquals(AudioProviderOrderItem.SOUNDCLOUD, defaultList[0])
+        assertEquals(AudioProviderOrderItem.YOUTUBE_MUSIC, defaultList[1])
+        assertEquals(
+            listOf(
+                AudioProviderOrderItem.SOUNDCLOUD,
+                AudioProviderOrderItem.YOUTUBE_MUSIC,
+                AudioProviderOrderItem.DEEZER,
+                AudioProviderOrderItem.TIDAL,
+                AudioProviderOrderItem.QOBUZ,
+            ),
+            defaultList
+        )
+
+        val serialized = AudioProviderOrder.serialize(defaultList)
+        val deserialized = AudioProviderOrder.deserialize(serialized)
+        assertEquals(defaultList, deserialized)
+
+        // Test partial decoding adds missing items in default order (SoundCloud, YouTube Music first)
+        val partial = AudioProviderOrder.deserialize("DEEZER,TIDAL")
+        assertEquals(AudioProviderOrderItem.DEEZER, partial[0])
+        assertEquals(AudioProviderOrderItem.TIDAL, partial[1])
+        assertEquals(AudioProviderOrderItem.SOUNDCLOUD, partial[2])
+        assertEquals(AudioProviderOrderItem.YOUTUBE_MUSIC, partial[3])
+        assertEquals(AudioProviderOrderItem.QOBUZ, partial[4])
+    }
+
+    @Test
+    fun testOnlyHiResProvidersAreDisableable() {
+        assertTrue(AudioProviderOrderItem.QOBUZ.isDisableable())
+        assertTrue(AudioProviderOrderItem.TIDAL.isDisableable())
+        assertTrue(AudioProviderOrderItem.DEEZER.isDisableable())
+        assertFalse(AudioProviderOrderItem.YOUTUBE_MUSIC.isDisableable())
+        assertFalse(AudioProviderOrderItem.SOUNDCLOUD.isDisableable())
+
+        assertEquals(
+            setOf(
+                AudioProviderOrderItem.QOBUZ,
+                AudioProviderOrderItem.TIDAL,
+                AudioProviderOrderItem.DEEZER
+            ),
+            AudioProviderOrder.Disableable
+        )
+    }
+
+    @Test
+    fun testDisabledSetSurvivesSerialization() {
+        val disabled = setOf(AudioProviderOrderItem.TIDAL, AudioProviderOrderItem.QOBUZ)
+        val raw = AudioProviderOrder.serializeDisabled(disabled)
+        assertEquals(disabled, AudioProviderOrder.deserializeDisabled(raw))
+    }
+
+    @Test
+    fun testBaseSourcesCanNeverBeSerializedAsDisabled() {
+        val raw = AudioProviderOrder.serializeDisabled(
+            setOf(
+                AudioProviderOrderItem.SOUNDCLOUD,
+                AudioProviderOrderItem.YOUTUBE_MUSIC
+            )
+        )
+        assertTrue(AudioProviderOrder.deserializeDisabled(raw).isEmpty())
+    }
+
+    @Test
+    fun testMalformedAndEmptyDisabledInputYieldsEmptySet() {
+        assertTrue(AudioProviderOrder.deserializeDisabled(null).isEmpty())
+        assertTrue(AudioProviderOrder.deserializeDisabled("").isEmpty())
+        assertTrue(AudioProviderOrder.deserializeDisabled("garbage,,TIDALX").isEmpty())
+        assertEquals(
+            setOf(AudioProviderOrderItem.DEEZER),
+            AudioProviderOrder.deserializeDisabled(" deezer , nope ")
+        )
+    }
+
+    @Test
+    fun testAudioProviderDrawablesExistAndValidXml() {
+        val providers = AudioProviderOrderItem.entries
+        val expectedDrawables = mapOf(
+            AudioProviderOrderItem.QOBUZ to com.alananasss.kittytune.R.drawable.ic_logo_qobuz,
+            AudioProviderOrderItem.TIDAL to com.alananasss.kittytune.R.drawable.ic_logo_tidal,
+            AudioProviderOrderItem.DEEZER to com.alananasss.kittytune.R.drawable.ic_logo_deezer,
+            AudioProviderOrderItem.YOUTUBE_MUSIC to com.alananasss.kittytune.R.drawable.ic_logo_youtube_music,
+            AudioProviderOrderItem.SOUNDCLOUD to com.alananasss.kittytune.R.drawable.ic_logo_soundcloud,
+        )
+
+        for (provider in providers) {
+            val resPath = expectedDrawables[provider]
+            assertNotNull("Missing expected drawable mapping for provider $provider", resPath)
+            val stream = Thread.currentThread().contextClassLoader.getResourceAsStream(resPath!!)
+            assertNotNull("Resource file $resPath must exist on classpath for provider $provider", stream)
+            val content = stream!!.bufferedReader().readText()
+            assertTrue("Drawable $resPath must be a valid vector tag", content.contains("<vector") && content.contains("</vector>"))
+        }
+
+        // Also verify ic_soundcloud.xml legacy path exists
+        val legacyStream = Thread.currentThread().contextClassLoader.getResourceAsStream("drawable/ic_soundcloud.xml")
+        assertNotNull("Legacy path drawable/ic_soundcloud.xml must exist on classpath", legacyStream)
+        legacyStream!!.close()
+    }
+
+    @Test
+    fun testProviderIsrcNormalize() {
+        assertEquals("USUM71900001", ProviderIsrc.normalize("US-UM7-19-00001"))
+        assertEquals("GBAYE0601477", ProviderIsrc.normalize("gb-aye-06-01477"))
+        assertNull(ProviderIsrc.normalize("INVALID_ISRC"))
+        assertNull(ProviderIsrc.normalize(null))
+        assertNull(ProviderIsrc.normalize(""))
+    }
+
+    @Test
+    fun testDeezerCookieUtils() {
+        // Raw ARL string (192 hex characters typically)
+        val dummyArl = "a".repeat(128)
+        val rawHeader = "arl=$dummyArl; sid=xyz123; Path=/; Domain=.deezer.com"
+        assertTrue(isDeezerCookieConfigured(rawHeader))
+
+        val parsedArl = deezerCookieValue(rawHeader, "arl")
+        assertEquals(dummyArl, parsedArl)
+        val parsedSid = deezerCookieValue(rawHeader, "sid")
+        assertEquals("xyz123", parsedSid)
+
+        val normalized = normalizeDeezerCookieInput(rawHeader)
+        assertNotNull(normalized)
+        assertTrue(normalized!!.contains("arl=$dummyArl"))
+    }
+
+    @Test
+    fun testTidalCookieUtils() {
+        val dummyRefreshToken = "refresh_token_1234567890abcdef"
+        val rawHeader = "refresh_token=$dummyRefreshToken; Path=/; Domain=.tidal.com"
+        assertTrue(isTidalCookieConfigured(rawHeader))
+
+        val token = extractTidalRefreshToken(rawHeader)
+        assertEquals(dummyRefreshToken, token)
+    }
+
+    @Test
+    fun testDeezerAudioProxyUriDetection() {
+        assertTrue(DeezerAudioProxy.isDeezerUri("metrofuse-deezer://stream?trackId=123"))
+        assertFalse(DeezerAudioProxy.isDeezerUri("https://deezer.com/track/123"))
+
+        assertTrue(DeezerAudioProxy.isDeezerProxyUrl("http://127.0.0.1:8080/deezer-stream?url=abc"))
+        assertFalse(DeezerAudioProxy.isDeezerProxyUrl("http://example.com/deezer-stream"))
+    }
+
+    @Test
+    fun testDeezerEffectiveProxyUrl() {
+        // Direct mode
+        val directUrl = DeezerAudioProvider.effectiveProxyUrl(
+            configuredProxyMode = DeezerProxyMode.DIRECT,
+            configuredProxyUrl = "https://custom.proxy.com",
+            globalProxyEnabled = false
+        )
+        assertEquals("", directUrl)
+
+        // Render mode
+        val renderUrl = DeezerAudioProvider.effectiveProxyUrl(
+            configuredProxyMode = DeezerProxyMode.RENDER,
+            configuredProxyUrl = "",
+            globalProxyEnabled = false
+        )
+        assertEquals(DeezerAudioProvider.normalizeProxyUrl(DeezerAudioProvider.RENDER_PROXY_BASE_URL), renderUrl)
+
+        // Custom mode
+        val customUrl = DeezerAudioProvider.effectiveProxyUrl(
+            configuredProxyMode = DeezerProxyMode.CUSTOM,
+            configuredProxyUrl = "https://myproxy.example.com",
+            globalProxyEnabled = false
+        )
+        assertEquals(DeezerAudioProvider.normalizeProxyUrl("https://myproxy.example.com"), customUrl)
+    }
+}

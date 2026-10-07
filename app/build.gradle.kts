@@ -11,6 +11,8 @@ plugins {
 }
 
 val localProperties = Properties()
+// Community packaging is opt-in and isolated from the upstream application's identity.
+val connectCommunityRelease = providers.gradleProperty("connectCommunityRelease").orNull == "true"
 val localPropertiesFile = rootProject.file("local.properties")
 if (localPropertiesFile.exists()) {
     localProperties.load(FileInputStream(localPropertiesFile))
@@ -32,6 +34,11 @@ extensions.configure<ApplicationExtension> {
         // and early beta-scheme codes, making this a one-way jump.
         versionCode = (System.currentTimeMillis() / 60000).toInt() + 10_000_000
         versionName = "2.68.0"
+        if (connectCommunityRelease) {
+            applicationIdSuffix = ".connect"
+            versionNameSuffix = "-connect.1"
+        }
+        manifestPlaceholders["appLabel"] = if (connectCommunityRelease) "KittyTune Connect" else "@string/app_name"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -69,6 +76,14 @@ extensions.configure<ApplicationExtension> {
     }
 
     signingConfigs {
+        if (connectCommunityRelease) {
+            create("community") {
+                storeFile = file(requireNotNull(System.getenv("CONNECT_STORE_FILE")) { "CONNECT_STORE_FILE is required" })
+                storePassword = requireNotNull(System.getenv("CONNECT_STORE_PASSWORD")) { "CONNECT_STORE_PASSWORD is required" }
+                keyAlias = "connect"
+                keyPassword = storePassword
+            }
+        }
         create("release") {
             val storeFilePath = localProperties.getProperty("RELEASE_STORE_FILE")
             if (!storeFilePath.isNullOrEmpty() && file(storeFilePath).exists()) {
@@ -87,6 +102,7 @@ extensions.configure<ApplicationExtension> {
             if (releaseSigning.storeFile?.exists() == true) {
                 signingConfig = releaseSigning
             }
+            if (connectCommunityRelease) signingConfig = signingConfigs.getByName("community")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

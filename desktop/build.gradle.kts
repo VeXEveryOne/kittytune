@@ -1,0 +1,438 @@
+import org.jetbrains.compose.desktop.application.dsl.TargetFormat
+
+plugins {
+    kotlin("jvm") version "2.4.20"
+    kotlin("plugin.serialization") version "2.4.20"
+    id("org.jetbrains.compose") version "1.12.1"
+    id("org.jetbrains.kotlin.plugin.compose") version "2.4.20"
+}
+
+group = "com.alananasss"
+version = "1.4.10"
+
+// Each version has its own package directory, so a build cannot overwrite a running release.
+val desktopDistributionDirectory = layout.buildDirectory.dir("compose/binaries/${project.version}")
+
+repositories {
+    google()
+    mavenCentral()
+    maven("https://central.sonatype.com/repository/maven-snapshots")
+    maven("https://oss.sonatype.org/content/repositories/snapshots")
+    maven("https://jitpack.io") {
+        content {
+            excludeGroup("com.github.hypfvieh")
+        }
+    }
+    maven("https://maven.pkg.jetbrains.space/public/p/compose/dev")
+}
+
+dependencies {
+    implementation("com.github.z-huang.InnerTune:lrclib:0.5.10")
+    implementation("com.github.z-huang.InnerTune:kugou:0.5.10")
+    implementation(compose.desktop.currentOs)
+    implementation("com.mocharealm.accompanist:lyrics-ui:1.0.19")
+    implementation("com.mocharealm.accompanist:lyrics-core:0.4.7")
+    implementation("org.jetbrains.compose.material3:material3:1.13.0-alpha01")
+    implementation(compose.materialIconsExtended)
+    implementation(compose.components.resources)
+
+    implementation(project(":kizzy"))
+    implementation(project(":shazamkit"))
+    implementation(project(":innertube"))
+
+    implementation("io.github.alexzhirkevich:compottie:2.3.2")
+
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.11.0")
+
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
+
+    implementation("org.jetbrains.androidx.navigation:navigation-compose:2.10.0-beta01")
+    implementation("org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0")
+
+    implementation("io.coil-kt.coil3:coil-compose:3.6.3")
+    implementation("io.coil-kt.coil3:coil-network-okhttp:3.6.3")
+
+    implementation("com.squareup.retrofit2:retrofit:3.0.0")
+    implementation("com.squareup.retrofit2:converter-gson:3.0.0")
+    implementation("com.squareup.okhttp3:okhttp:5.5.0")
+    implementation("org.java-websocket:Java-WebSocket:1.6.0")
+    implementation("com.squareup.okhttp3:logging-interceptor:5.5.0")
+
+    val ktorVersion = "3.6.0"
+    implementation("io.ktor:ktor-client-core:$ktorVersion")
+    implementation("io.ktor:ktor-client-okhttp:$ktorVersion")
+    implementation("io.ktor:ktor-client-content-negotiation:$ktorVersion")
+    implementation("io.ktor:ktor-serialization-kotlinx-json:$ktorVersion")
+    implementation("io.ktor:ktor-client-encoding:$ktorVersion")
+
+    implementation("net.jthink:jaudiotagger:3.0.1")
+    implementation("com.mpatric:mp3agic:0.9.1")
+    implementation("com.github.TeamNewPipe:NewPipeExtractor:v0.26.2")
+
+    val javacvVersion = "1.5.10"
+    implementation("org.bytedeco:javacv:$javacvVersion") {
+        exclude(group = "org.bytedeco", module = "opencv")
+    }
+    implementation("org.bytedeco:ffmpeg:6.1.1-$javacvVersion")
+
+    val osName = System.getProperty("os.name").lowercase()
+    val osArch = System.getProperty("os.arch").lowercase()
+    val platformClassifier = when {
+        osName.contains("win") -> "windows-x86_64"
+        osName.contains("mac") && osArch.contains("aarch64") -> "macosx-arm64"
+        osName.contains("mac") -> "macosx-x86_64"
+        osName.contains("linux") && osArch.contains("aarch64") -> "linux-arm64"
+        osName.contains("linux") -> "linux-x86_64"
+        else -> null
+    }
+    if (platformClassifier != null) {
+        implementation("org.bytedeco:ffmpeg:6.1.1-$javacvVersion:$platformClassifier")
+        implementation("org.bytedeco:javacpp:$javacvVersion:$platformClassifier")
+    }
+
+    implementation("sh.calvin.reorderable:reorderable:3.1.0")
+    implementation("com.materialkolor:material-kolor:5.0.1")
+    implementation("org.xerial:sqlite-jdbc:3.53.4.0")
+    implementation("org.slf4j:slf4j-simple:2.0.20")
+
+    // QR rendering for the Discord remote-auth (scan-to-log-in) flow. Same artifact and
+    // version the Android app already uses for its VK QR login.
+    implementation("com.google.zxing:core:3.5.4")
+
+    implementation("org.json:json:20260814")
+    implementation("org.yaml:snakeyaml:2.7")
+    implementation("com.github.pemistahl:lingua:1.2.2")
+    implementation("net.java.dev.jna:jna:5.19.1")
+    implementation("net.java.dev.jna:jna-platform:5.19.1")
+
+    implementation("com.github.hypfvieh:dbus-java-core:5.2.2")
+    implementation("com.github.hypfvieh:dbus-java-transport-jnr-unixsocket:5.2.2")
+
+    testImplementation(kotlin("test"))
+    testImplementation("junit:junit:4.13.2")
+}
+
+// `-PuiScale=1.5` runs the tests as on a display scaled to 150%. AWT reads the property once at start-up,
+// which is why it is a JVM argument of the test task and not something a test could set for itself.
+tasks.withType<Test>().configureEach {
+    providers.gradleProperty("uiScale").orNull?.let { systemProperty("sun.java2d.uiScale", it) }
+}
+
+compose.desktop {
+    application {
+        mainClass = "com.alananasss.kittytune.MainKt"
+
+        // Grants what the app already does, so the JDK stops warning about it on every launch:
+        // sqlite-jdbc loads its native library, and Gson writes final fields when it
+        // deserializes our data classes. Both are integrity-by-default warnings today and hard
+        // errors in a later JDK, so declaring them now is also what keeps the app running then.
+        // Gated on the build JDK because the packaged runtime is built from it, and an older
+        // one would refuse to start on an option it does not know.
+        val buildJdk = JavaVersion.current().majorVersion.toIntOrNull() ?: 0
+        if (buildJdk >= 24) jvmArgs += "--enable-native-access=ALL-UNNAMED"
+        // JEP 500's option only exists from JDK 26; a JDK 25 launcher refuses to start on it.
+        if (buildJdk >= 26) jvmArgs += "--enable-final-field-mutation=ALL-UNNAMED"
+        // jffi, pulled in by the D-Bus transport, reaches into sun.misc.Unsafe for memory
+        // access. Nothing we can fix from here — the flag is the JDK's own way to say "known,
+        // stop printing it", and it also keeps that code working once the default flips to
+        // deny. The day Unsafe actually goes, jnr needs a release either way.
+        if (buildJdk >= 24) jvmArgs += "--sun-misc-unsafe-memory-access=allow"
+
+        // Memory, and why an audio app cares about the collector it gets (issue #33).
+        //
+        // Reported as "500 MB at launch, 1000 MB later, sometimes 4000 MB, and the song freezes for
+        // an instant and then stops". Without -Xmx the JVM sets the ceiling to a quarter of physical
+        // RAM, so on a 16 GB machine it will happily grow to 4 GB before collecting in earnest —
+        // which is exactly the number reported. Nothing needs that: the image cache is capped at
+        // 128 MB and everything else is small.
+        //
+        // The freeze and the stop are one event. A stop-the-world collection of a multi-gigabyte
+        // heap takes long enough to starve the decode loop, the output line runs dry, and playback
+        // stops. G1 is named explicitly rather than left to ergonomics because a machine the JVM
+        // judges "client class" gets SerialGC, whose full collections are the longest of the lot,
+        // and a pause target tells it to work in short increments instead of one long sweep.
+        // 2 GB, not the quarter of physical RAM the JVM defaults to. The ceiling exists to stop the
+        // 4 GB balloon that was reported, not to squeeze the app: a library of tens of thousands of
+        // liked tracks genuinely needs several hundred megabytes while it hydrates, and a tighter
+        // cap turns a stutter into an OutOfMemoryError in the middle of playback.
+        jvmArgs += "-Xmx2g"
+        jvmArgs += "-XX:+UseG1GC"
+        jvmArgs += "-XX:MaxGCPauseMillis=50"
+        // Give the pages back, but never by stopping the world (issue #33).
+        //
+        // This used to also carry `-XX:MinHeapFreeRatio=10 -XX:MaxHeapFreeRatio=30`, to stop the system
+        // monitor showing 266 MB committed against 80 MB live. Three diagnostic logs from the reporter say
+        // plainly what that cost, and it is the bug he has been describing all along:
+        //
+        //   G1 Old Generation: 2 collections, 67 ms      (up 1 min)
+        //   G1 Old Generation: 20 collections, 540 ms    (up 10 min)
+        //   G1 Old Generation: 40 collections, 1104 ms   (up 22 min)
+        //
+        // Two *full*, stop-the-world collections a minute, from the first minute, in every session in
+        // every log. A healthy G1 application does none at all: the whole point of the collector is that
+        // old-generation work happens concurrently. Squeezing committed memory to within 30% of live
+        // leaves G1 no room to evacuate into, and when a concurrent cycle cannot keep up the fallback is a
+        // full compacting pause. So the flag that was meant to make the memory number look honest was
+        // buying it with a pause twice a minute, forever.
+        //
+        // At an 80 MB live set those pauses are 25 ms and nobody notices, which is why they were measured
+        // as harmless. At the 1.2 GB the same log later reaches, the same policy produced thirteen of them
+        // in nine minutes at 200 to 411 ms each — "the song stops for a millisecond and then continues,
+        // several times per song", and once "froze 1 sec". Two a minute is several per song exactly.
+        //
+        // What is left is the half that was already pauseless. A periodic cycle is what triggers an
+        // uncommit at all — a player sitting idle never allocates hard enough to collect on its own — and
+        // pinned to a *concurrent* cycle it hands memory back at the end of the cycle without a pause. It
+        // gives back less than the ratios did. Giving back less is the right trade against an audible gap,
+        // and the number in the system monitor is not what anybody is listening to.
+        jvmArgs += "-XX:G1PeriodicGCInterval=60000"
+        jvmArgs += "-XX:+G1PeriodicGCInvokesConcurrent"
+        // And if anything asks for a collection by hand, it is served concurrently rather than as a full
+        // pause. Nothing in this app calls System.gc(), so today this costs nothing; it is here so that a
+        // dependency, or a well-meaning line added later, cannot quietly reintroduce the pause that took
+        // three diagnostic builds to find. (The diagnostic build's own class histogram is unaffected — a
+        // heap inspection still collects for real, which is what makes its numbers live ones.)
+        jvmArgs += "-XX:+ExplicitGCInvokesConcurrent"
+        // Thousands of tracks repeat the same artist names, genres and CDN prefixes. Deduplicating
+        // those strings costs a background pass and gives back real memory here.
+        jvmArgs += "-XX:+UseStringDeduplication"
+        // Skia's GPU resource cache defaults to 256 MB of textures and render targets, which it fills
+        // and keeps. Everything this app draws is covers and flat UI, re-uploaded in microseconds from
+        // the decoded copies Coil already holds, so a quarter of that is plenty. Measured over six
+        // minutes of track changes: steady state ~710 MB instead of ~760 MB private memory.
+        jvmArgs += "-Dskiko.gpu.resourceCacheLimit=67108864"
+
+        /**
+         * Where the memory actually goes, on demand: `./gradlew packageReleaseMsi -PmemDiag`.
+         *
+         * The heap is capped at 2 GB above, so the 4 GB that was reported has at least half of itself
+         * somewhere the heap cannot account for, and no figure a task manager shows can say where.
+         * Native memory tracking can, but the JVM only collects it when asked at startup, so it takes
+         * a build of its own. `MemoryDiagnostics` reads the result from inside the process and writes
+         * it to a file, so nobody has to install a JDK or open a terminal to send it back.
+         *
+         * Deliberately not on by default: tracking costs a few percent and a little memory of its
+         * own, which is a poor trade for everyone who is not currently being asked about it.
+         */
+        if (project.hasProperty("memDiag")) {
+            jvmArgs += "-XX:NativeMemoryTracking=summary"
+            jvmArgs += "-Dkittytune.memlog=true"
+        }
+
+
+        buildTypes.release.proguard {
+            isEnabled.set(false)
+        }
+
+        nativeDistributions {
+            outputBaseDir.set(desktopDistributionDirectory)
+            targetFormats(
+                TargetFormat.Dmg,
+                TargetFormat.Msi,
+                TargetFormat.Deb,
+                TargetFormat.Rpm,
+                TargetFormat.AppImage
+            )
+            packageName = "KittyTune"
+            // Must track the project version: the MSI ProductVersion has to increase with
+            // every release, otherwise Windows Installer refuses the upgrade with
+            // "Another version of this product is already installed" (issue #73).
+            // Never hardcode this again — it drifted (1.3.9) while version moved to 1.4.0.
+            packageVersion = project.version.toString()
+            description = "KittyTuneDesktop"
+            vendor = "KittyTune"
+
+            modules(
+                "java.compiler",
+                "java.instrument",
+                "java.management",
+                "java.net.http",
+                "java.sql",
+                "java.naming",
+                "java.scripting",
+                "java.prefs",
+                "jdk.dynalink",
+                // The diagnostic command MBean and the OS memory bean live here. Included in every
+                // build so the diagnostic one differs from a release by launcher flags alone, which
+                // is what makes what it measures worth anything (issue #33).
+                "jdk.management",
+                "jdk.httpserver",
+                "jdk.jfr",
+                "jdk.unsupported",
+                "jdk.unsupported.desktop",
+                "jdk.security.auth"
+            )
+
+            // "Open with KittyTune" and the music entry in the OS's default-apps settings. Neither
+            // Windows nor the Linux desktops hand over an existing default without the user saying
+            // so; this only makes KittyTune one of the choices. Files arrive as main() arguments.
+            val audioFileTypes = mapOf(
+                "mp3" to "audio/mpeg",
+                "flac" to "audio/flac",
+                "m4a" to "audio/mp4",
+                "aac" to "audio/aac",
+                "ogg" to "audio/ogg",
+                "opus" to "audio/opus",
+                "wav" to "audio/wav",
+                "wma" to "audio/x-ms-wma",
+            )
+
+            windows {
+                audioFileTypes.forEach { (extension, mimeType) ->
+                    fileAssociation(mimeType, extension, "Audio file (.$extension)", project.file("src/main/resources/icons/kittytune.ico"))
+                }
+                shortcut = true
+                menu = true
+                dirChooser = true
+                perUserInstall = true
+                upgradeUuid = "6f8d30e5-7971-4a7b-a19c-49fb1e5b1234"
+                iconFile.set(project.file("src/main/resources/icons/kittytune.ico"))
+            }
+
+            linux {
+                audioFileTypes.forEach { (extension, mimeType) ->
+                    fileAssociation(mimeType, extension, "Audio file (.$extension)", project.file("src/main/resources/icons/kittytune_linux.png"))
+                }
+                shortcut = true
+                menuGroup = "AudioVideo"
+                appCategory = "AudioVideo"
+                packageName = "kitty-tune"
+                iconFile.set(project.file("src/main/resources/icons/kittytune_linux.png"))
+            }
+
+            macOS {
+                bundleID = "com.alananasss.kittytune"
+                appCategory = "public.app-category.music"
+                // Without this jpackage bundles its own generic Java icon, and the variant
+                // switcher then has nothing recognisable to fall back to.
+                iconFile.set(project.file("src/main/resources/icons/kittytune.icns"))
+            }
+        }
+    }
+}
+
+tasks.withType<JavaExec>().configureEach {
+    systemProperty("sun.java2d.wm.className", "kitty-tune")
+}
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
+
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+    compilerOptions.jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
+    compilerOptions.freeCompilerArgs.addAll("-opt-in=androidx.compose.material3.ExperimentalMaterial3Api", "-opt-in=androidx.compose.foundation.ExperimentalFoundationApi")
+    // Diagnostic reports are opt-in. The upstream raw metrics compiler arguments
+    // fail with an invalid filename on Windows in this Kotlin/Gradle combination.
+}
+
+composeCompiler {
+    if (providers.gradleProperty("composeReports").orNull == "true") {
+        reportsDestination.set(layout.buildDirectory.dir("compose-reports"))
+        metricsDestination.set(layout.buildDirectory.dir("compose-metrics"))
+    }
+}
+
+// Auto-generate BuildConfig.kt from the project version so it's always in sync.
+val generateBuildConfig by tasks.registering {
+    val versionName = project.version.toString()
+    val outDir = layout.projectDirectory.dir("src/main/kotlin/com/alananasss/kittytune")
+    outputs.file(outDir.file("BuildConfig.kt"))
+    doLast {
+        outDir.file("BuildConfig.kt").asFile.writeText(
+            "package com.alananasss.kittytune\n\n" +
+            "/**\n" +
+            " * Desktop replacement for the Android generated BuildConfig.\n" +
+            " * AUTO-GENERATED \u2014 do not edit manually. Change `version` in build.gradle.kts instead.\n" +
+            " */\n" +
+            "object BuildConfig {\n" +
+            "    const val APPLICATION_ID = \"com.alananasss.kittytune\"\n" +
+            "    const val VERSION_NAME = \"$versionName\"\n" +
+            "    const val VERSION_CODE = 1\n" +
+            "    const val DEBUG = false\n" +
+            "}\n"
+        )
+    }
+}
+
+tasks.named("compileKotlin") { dependsOn(generateBuildConfig) }
+
+val compileNativeDSP by tasks.registering(Exec::class) {
+    val cppDir = project.file("src/main/cpp")
+    val outDir = layout.buildDirectory.dir("generated/native-resources/native").get().asFile
+    
+    doFirst { outDir.mkdirs() }
+    
+    val osName = System.getProperty("os.name").lowercase()
+    val isMac = osName.contains("mac")
+    val isWin = osName.contains("win")
+    val libExt = if (isWin) "dll" else if (isMac) "dylib" else "so"
+    val osIncludeDir = if (isWin) "win32" else if (isMac) "darwin" else "linux"
+    
+    val outFile = File(outDir, "libkittytune_audio_dsp.$libExt")
+    
+    val javaHome = System.getProperty("java.home")
+    inputs.dir(cppDir)
+    inputs.file("scripts/build-native-windows.ps1")
+    inputs.property("javaHome", javaHome)
+    outputs.file(outFile)
+    if (isWin) {
+        commandLine("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+            "-File", project.file("scripts/build-native-windows.ps1").absolutePath,
+            "-JavaHome", javaHome, "-OutputDirectory", outDir.absolutePath)
+    } else {
+        commandLine(
+            "g++", "-shared", "-fPIC", "-O3",
+            "-I$javaHome/include", "-I$javaHome/include/$osIncludeDir",
+            "-I${File(cppDir, "ebur128/queue").absolutePath}",
+            File(cppDir, "KittyTuneAudioDSP.cpp").absolutePath,
+            File(cppDir, "ebur128/ebur128.c").absolutePath,
+            "-o", outFile.absolutePath
+        )
+    }
+}
+
+tasks.named<ProcessResources>("processResources") {
+    dependsOn(compileNativeDSP)
+    from(layout.buildDirectory.dir("generated/native-resources")) {
+        include("native/*.dll", "native/*.so", "native/*.dylib")
+    }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
+
+// Background-only checks: no windows, tray, media keys, or real user profile.
+tasks.register<Test>("headlessTest") {
+    description = "Runs deterministic desktop regressions without opening windows or playing sound."
+    group = "verification"
+    testClassesDirs = sourceSets.test.get().output.classesDirs
+    classpath = sourceSets.test.get().runtimeClasspath
+    systemProperty("java.awt.headless", "true")
+    val profile = layout.buildDirectory.dir("test-profile").get().asFile
+    systemProperty("user.home", File(profile, "home").absolutePath)
+    environment("APPDATA", File(profile, "roaming").absolutePath)
+    environment("LOCALAPPDATA", File(profile, "local").absolutePath)
+    systemProperty("java.io.tmpdir", File(profile, "tmp").absolutePath)
+    doFirst { listOf("home", "roaming", "local", "tmp").forEach { File(profile, it).mkdirs() } }
+    maxHeapSize = "768m"
+    maxParallelForks = 1
+    filter {
+        listOf("SignedUrlTest", "SidebarNavLayoutTest", "QueuePlayedMarkingTest",
+            "PlayerRemainingTimeTest", "PlaylistTotalDurationTest", "SettingsSearchTest",
+            "VolumeCurveTest", "TrackTrimTest", "TrimTimeParseTest", "SyncMergeTest", "SyncPlaybackTest", "ConnectWireTest", "ConnectSocketListenerTest", "ConnectHandoffTest",
+            "WindowBoundsRestorationTest", "TextFieldShortcutGuardTest", "PaletteCacheTest", "PeakLimiterTest",
+            "WindowsNativeDspTest", "DesktopRenderTest", "DesktopDensityTest"
+        ).forEach(::includeTestsMatching)
+    }
+}
+
+tasks.register<Zip>("zipWindowsPortable") {
+    description = "Packages a Windows app including its Java runtime; no installer or system Java needed."
+    group = "distribution"
+    dependsOn("createReleaseDistributable")
+    from(desktopDistributionDirectory.map { it.dir("main-release/app") })
+    destinationDirectory.set(layout.projectDirectory.dir("release"))
+    archiveFileName.set("KittyTune-${project.version}-Windows-Portable-x64.zip")
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
+}

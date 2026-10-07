@@ -41,7 +41,7 @@
             android:dataExtractionRules="@xml/data_extraction_rules"
             android:fullBackupContent="@xml/backup_rules"
             android:icon="@mipmap/ic_launcher"
-            android:label="@string/app_name"
+            android:label="${appLabel}"
             android:roundIcon="@mipmap/ic_launcher_round"
             android:supportsRtl="true"
             android:theme="@style/Theme.SoundTune"
@@ -61,7 +61,7 @@
             <activity
                 android:name=".MainActivity"
                 android:exported="true"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:launchMode="singleTask"
                 android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|mnc|colorMode|density|smallestScreenSize"
                 android:theme="@style/Theme.SoundTune"
@@ -132,7 +132,7 @@
                 android:exported="true"
                 android:icon="@mipmap/ic_launcher"
                 android:roundIcon="@mipmap/ic_launcher_round"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -148,7 +148,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_black"
                 android:roundIcon="@mipmap/sc_ic_black"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -164,7 +164,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_blue"
                 android:roundIcon="@mipmap/sc_ic_blue"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -180,7 +180,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_chrome"
                 android:roundIcon="@mipmap/sc_ic_chrome"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -196,7 +196,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_hot_pink"
                 android:roundIcon="@mipmap/sc_ic_hot_pink"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -212,7 +212,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_lavender"
                 android:roundIcon="@mipmap/sc_ic_lavender"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -228,7 +228,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_leopard"
                 android:roundIcon="@mipmap/sc_ic_leopard"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -244,7 +244,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_lime"
                 android:roundIcon="@mipmap/sc_ic_lime"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -260,7 +260,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_og"
                 android:roundIcon="@mipmap/sc_ic_og"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -276,7 +276,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_rose_gold"
                 android:roundIcon="@mipmap/sc_ic_rose_gold"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -292,7 +292,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_silver"
                 android:roundIcon="@mipmap/sc_ic_silver"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -308,7 +308,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_soft_purple"
                 android:roundIcon="@mipmap/sc_ic_soft_purple"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -324,7 +324,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_sunset"
                 android:roundIcon="@mipmap/sc_ic_sunset"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -340,7 +340,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_tie_dye"
                 android:roundIcon="@mipmap/sc_ic_tie_dye"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -356,7 +356,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_algeria"
                 android:roundIcon="@mipmap/sc_ic_algeria"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -372,7 +372,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_argentina"
                 android:roundIcon="@mipmap/sc_ic_argentina"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -388,7 +388,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_australia"
                 android:roundIcon="@mipmap/sc_ic_australia"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -404,7 +404,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_austria"
                 android:roundIcon="@mipmap/sc_ic_austria"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -420,7 +420,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_belgium"
                 android:roundIcon="@mipmap/sc_ic_belgium"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -436,7 +436,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_bosnia_herzegovina"
                 android:roundIcon="@mipmap/sc_ic_bosnia_herzegovina"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -452,7 +452,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_brazil"
                 android:roundIcon="@mipmap/sc_ic_brazil"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -468,7 +468,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_canada"
                 android:roundIcon="@mipmap/sc_ic_canada"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -484,7 +484,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_cape_verde"
                 android:roundIcon="@mipmap/sc_ic_cape_verde"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -500,7 +500,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_colombia"
                 android:roundIcon="@mipmap/sc_ic_colombia"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -516,7 +516,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_croatia"
                 android:roundIcon="@mipmap/sc_ic_croatia"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -532,7 +532,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_curacao"
                 android:roundIcon="@mipmap/sc_ic_curacao"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -548,7 +548,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_czechia"
                 android:roundIcon="@mipmap/sc_ic_czechia"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -564,7 +564,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_dr_congo"
                 android:roundIcon="@mipmap/sc_ic_dr_congo"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -580,7 +580,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_ecuador"
                 android:roundIcon="@mipmap/sc_ic_ecuador"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -596,7 +596,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_egypt"
                 android:roundIcon="@mipmap/sc_ic_egypt"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -612,7 +612,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_england"
                 android:roundIcon="@mipmap/sc_ic_england"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -628,7 +628,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_france"
                 android:roundIcon="@mipmap/sc_ic_france"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -644,7 +644,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_germany"
                 android:roundIcon="@mipmap/sc_ic_germany"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -660,7 +660,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_ghana"
                 android:roundIcon="@mipmap/sc_ic_ghana"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -676,7 +676,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_haiti"
                 android:roundIcon="@mipmap/sc_ic_haiti"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -692,7 +692,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_iran"
                 android:roundIcon="@mipmap/sc_ic_iran"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -708,7 +708,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_iraq"
                 android:roundIcon="@mipmap/sc_ic_iraq"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -724,7 +724,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_ivory_coast"
                 android:roundIcon="@mipmap/sc_ic_ivory_coast"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -740,7 +740,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_japan"
                 android:roundIcon="@mipmap/sc_ic_japan"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -756,7 +756,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_jordan"
                 android:roundIcon="@mipmap/sc_ic_jordan"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -772,7 +772,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_mexico"
                 android:roundIcon="@mipmap/sc_ic_mexico"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -788,7 +788,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_morocco"
                 android:roundIcon="@mipmap/sc_ic_morocco"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -804,7 +804,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_netherlands"
                 android:roundIcon="@mipmap/sc_ic_netherlands"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -820,7 +820,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_new_zealand"
                 android:roundIcon="@mipmap/sc_ic_new_zealand"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -836,7 +836,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_norway"
                 android:roundIcon="@mipmap/sc_ic_norway"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -852,7 +852,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_panama"
                 android:roundIcon="@mipmap/sc_ic_panama"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -868,7 +868,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_paraguay"
                 android:roundIcon="@mipmap/sc_ic_paraguay"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -884,7 +884,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_portugal"
                 android:roundIcon="@mipmap/sc_ic_portugal"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -900,7 +900,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_qatar"
                 android:roundIcon="@mipmap/sc_ic_qatar"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -916,7 +916,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_saudi_arabia"
                 android:roundIcon="@mipmap/sc_ic_saudi_arabia"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -932,7 +932,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_scotland"
                 android:roundIcon="@mipmap/sc_ic_scotland"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -948,7 +948,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_senegal"
                 android:roundIcon="@mipmap/sc_ic_senegal"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -964,7 +964,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_south_africa"
                 android:roundIcon="@mipmap/sc_ic_south_africa"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -980,7 +980,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_south_korea"
                 android:roundIcon="@mipmap/sc_ic_south_korea"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -996,7 +996,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_spain"
                 android:roundIcon="@mipmap/sc_ic_spain"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -1012,7 +1012,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_sweden"
                 android:roundIcon="@mipmap/sc_ic_sweden"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -1028,7 +1028,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_switzerland"
                 android:roundIcon="@mipmap/sc_ic_switzerland"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -1044,7 +1044,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_tunisia"
                 android:roundIcon="@mipmap/sc_ic_tunisia"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -1060,7 +1060,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_turkey"
                 android:roundIcon="@mipmap/sc_ic_turkey"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -1076,7 +1076,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_united_states"
                 android:roundIcon="@mipmap/sc_ic_united_states"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -1092,7 +1092,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_uruguay"
                 android:roundIcon="@mipmap/sc_ic_uruguay"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />
@@ -1108,7 +1108,7 @@
                 android:exported="true"
                 android:icon="@mipmap/sc_ic_uzbekistan"
                 android:roundIcon="@mipmap/sc_ic_uzbekistan"
-                android:label="@string/app_name"
+                android:label="${appLabel}"
                 android:targetActivity=".MainActivity">
                 <intent-filter>
                     <action android:name="android.intent.action.MAIN" />

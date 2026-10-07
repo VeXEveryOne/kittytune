@@ -1,0 +1,1793 @@
+    package com.alananasss.kittytune.ui.home
+
+import com.alananasss.kittytune.core.str
+import com.alananasss.kittytune.core.Application
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import com.alananasss.kittytune.core.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.alananasss.kittytune.data.HistoryRepository
+import com.alananasss.kittytune.data.LikeRepository
+import com.alananasss.kittytune.data.RecentSearchRepository
+import com.alananasss.kittytune.data.SearchCategory
+import com.alananasss.kittytune.data.TokenManager
+import com.alananasss.kittytune.data.local.HistoryItem
+import com.alananasss.kittytune.data.network.RetrofitClient
+import com.alananasss.kittytune.domain.Playlist
+import com.alananasss.kittytune.domain.Track
+import com.alananasss.kittytune.domain.User
+import com.alananasss.kittytune.utils.Logger
+    import com.alananasss.kittytune.data.SessionManager
+    import com.google.gson.Gson
+    import com.google.gson.reflect.TypeToken
+    import kotlinx.coroutines.Dispatchers
+    import kotlinx.coroutines.flow.MutableSharedFlow
+    import kotlinx.coroutines.flow.asSharedFlow
+    import kotlinx.coroutines.Job
+    import kotlinx.coroutines.async
+    import kotlinx.coroutines.coroutineScope
+    import kotlinx.coroutines.delay
+    import kotlinx.coroutines.flow.first
+    import kotlinx.coroutines.launch
+    import kotlinx.coroutines.withContext
+    import okhttp3.Request
+    import java.net.URLDecoder
+    import java.util.Locale
+    import java.util.regex.Pattern
+    import androidx.compose.material.icons.Icons
+    import androidx.compose.material.icons.rounded.*
+    import androidx.compose.ui.graphics.vector.ImageVector
+    import kotlinx.coroutines.awaitAll
+    import com.alananasss.kittytune.utils.NetworkUtils
+
+    data class HomeSection(
+        val title: String,
+        val subtitle: String? = null,
+        val content: List<Any>,
+        val type: SectionType
+    )
+    
+    enum class SectionType {
+        TRACKS_ROW, ARTISTS_ROW, STATIONS_ROW, DISCOVERY_ROW, HIGHLIGHT_ROW
+    }
+    
+    data class HomeCacheData(
+        val user: User?,
+        val sections: List<HomeSectionCache>
+    )
+    
+    data class HomeSectionCache(
+        val title: String,
+        val subtitle: String?,
+        val type: SectionType,
+        val tracks: List<Track> = emptyList(),
+        val playlists: List<Playlist> = emptyList(),
+        val users: List<User> = emptyList()
+    )
+    
+    enum class SearchFilter {
+        ALL, TRACKS, ARTISTS, PLAYLISTS
+    }
+    
+    enum class SearchSource {
+        SOUNDCLOUD, YOUTUBE, YOUTUBE_MUSIC, SPOTIFY,
+
+        /**
+         * Catalogue only — see [com.alananasss.kittytune.data.applemusic.AppleMusicClient]. Apple's own
+         * streams are DRM-protected, so a result here is a name to go and find on a source that plays:
+         * "many artists don't upload their music to soundcloud, youtube, spotify" (issue #33).
+         */
+        APPLE_MUSIC,
+
+        /**
+         * Also catalogue only, and for a second reason on top of Apple's: reaching Yandex's audio needs a
+         * signing secret out of their own client. See [com.alananasss.kittytune.data.yandex.YandexMusicClient].
+         */
+        YANDEX_MUSIC,
+
+        DEEZER,
+        TIDAL,
+        QOBUZ,
+    }
+
+    /**
+     * Why a Yandex search produced nothing, when the answer is not "nothing matched".
+     *
+     * Three states that all look like an empty list and are not the same thing to the person looking at it.
+     */
+    enum class YandexNotice { NOT_CONNECTED, REGION_BLOCKED, FAILED }
+    
+    class HomeViewModel(application: Application) : AndroidViewModel(application) {
+        private val api = RetrofitClient.create()
+        private val prefs = com.alananasss.kittytune.core.NamedPrefs("home_cache")
+        private val gson = Gson()
+        private val tokenManager = TokenManager
+    
+        private val _navigateTo = MutableSharedFlow<String>()
+        val navigateTo = _navigateTo.asSharedFlow()
+    
+        private val _playTrack = MutableSharedFlow<Track>()
+        val playTrack = _playTrack.asSharedFlow()
+    
+        private fun getString(resId: String): String = com.alananasss.kittytune.core.str(resId)
+        private fun getString(resId: String, vararg args: Any): String = com.alananasss.kittytune.core.str(resId, *args)
+    
+        var userProfile by mutableStateOf<User?>(null)
+    
+        val homeSections = mutableStateListOf<HomeSection>()
+        val historyFlow = HistoryRepository.getHistory()
+    
+        var isSearching by mutableStateOf(false)
+        var searchQuery by mutableStateOf("")
+        var activeFilter by mutableStateOf(SearchFilter.ALL)
+        var isSearchLoading by mutableStateOf(false)
+        var activeSearchSource by mutableStateOf(SearchSource.SOUNDCLOUD)
+    
+    
+        var isLoading by mutableStateOf(true)
+        var isRefreshing by mutableStateOf(false)
+        var isOfflineMode by mutableStateOf(!NetworkUtils.isInternetAvailable())
+    
+        val searchResultsTracks = mutableStateListOf<Track>()
+        val searchResultsArtists = mutableStateListOf<User>()
+        val searchResultsPlaylists = mutableStateListOf<Playlist>()
+        val searchResultsYoutube = mutableStateListOf<Track>()
+        val searchResultsYoutubeMusic = mutableStateListOf<Track>()
+        private var youtubeMusicContinuation: String? = null
+        val searchResultsSpotify = mutableStateListOf<Track>()
+
+        val searchResultsDeezerTracks = mutableStateListOf<Track>()
+        val searchResultsDeezerAlbums = mutableStateListOf<Playlist>()
+        val searchResultsDeezerPlaylists = mutableStateListOf<Playlist>()
+        val searchResultsDeezerArtists = mutableStateListOf<User>()
+
+        val searchResultsTidalTracks = mutableStateListOf<Track>()
+        val searchResultsTidalAlbums = mutableStateListOf<Playlist>()
+        val searchResultsTidalPlaylists = mutableStateListOf<Playlist>()
+        val searchResultsTidalArtists = mutableStateListOf<User>()
+
+        val searchResultsQobuzTracks = mutableStateListOf<Track>()
+        val searchResultsQobuzAlbums = mutableStateListOf<Playlist>()
+        val searchResultsQobuzPlaylists = mutableStateListOf<Playlist>()
+        val searchResultsQobuzArtists = mutableStateListOf<User>()
+
+        /**
+         * Apple Music hits, kept as catalogue entries rather than as tracks.
+         *
+         * Deliberately not `mutableStateListOf<Track>` like the others: nothing here can be handed to the
+         * player, and a list whose type says so is what stops one reaching the queue by accident. Pressing
+         * one goes through [com.alananasss.kittytune.data.applemusic.AppleMusicFallback] first (issue #33).
+         */
+        val searchResultsApple =
+            mutableStateListOf<com.alananasss.kittytune.data.catalog.CatalogSong>()
+
+        /** Why a Yandex search came back with nothing, when that was not simply "nothing matched". */
+        var yandexNotice by mutableStateOf<YandexNotice?>(null)
+            private set
+
+        /** The Apple result currently being looked for on a source that streams, if any. */
+        var resolvingAppleSongId by mutableStateOf<String?>(null)
+            private set
+        val searchResultsSpotifyAlbums = mutableStateListOf<com.alananasss.kittytune.data.spotify.SpotifyAlbum>()
+        val searchResultsSpotifyPlaylists = mutableStateListOf<com.alananasss.kittytune.data.spotify.SpotifyPlaylist>()
+        val searchResultsSpotifyArtists = mutableStateListOf<com.alananasss.kittytune.data.spotify.SpotifyArtist>()
+    
+        private var tracksNextUrl: String? = null
+        private var artistsNextUrl: String? = null
+        private var playlistsNextUrl: String? = null
+        var isSearchLoadingMore by mutableStateOf(false)
+    
+        private var searchJob: Job? = null
+        val personalizedCategories = mutableStateListOf<SearchCategory>()
+    
+        // ── Search landing (issue #56) ──
+        // What the search screen shows when the field is empty. Moods and genres used to be here as
+        // two long chip walls; they are static lists of taste categories, and neither of them changes
+        // with the listener, so they took the two most valuable rows on the screen to say nothing.
+        // What is here instead is per-listener and either a chart or something already known: the
+        // queries just run, the songs in the chart, and what the artists you liked have put out.
+
+        /** The queries already run, newest first. */
+        val recentSearches = mutableStateListOf<String>()
+        private var recentSearchesJob: Job? = null
+
+        /** Enough of the chart to preview on the landing; the whole thing lives on the Charts screen. */
+        val chartPreview = mutableStateListOf<ChartEntry>()
+        var chartPreviewKind by mutableStateOf(ChartKind.TOP)
+            private set
+        var isChartPreviewLoading by mutableStateOf(false)
+            private set
+
+        /** Newest songs from the artists whose work is already in the liked list. */
+        val likedArtistUpdates = mutableStateListOf<Track>()
+
+        private fun observeRecentSearches() {
+            if (recentSearchesJob != null) return
+            recentSearchesJob = viewModelScope.launch {
+                RecentSearchRepository.recent().collect { terms ->
+                    recentSearches.clear()
+                    recentSearches.addAll(terms)
+                }
+            }
+        }
+
+        /** Called when a search is actually run, so a half-typed word never becomes history. */
+        private fun recordSearch(query: String) {
+            viewModelScope.launch { RecentSearchRepository.record(query) }
+        }
+
+        fun forgetSearch(query: String) {
+            viewModelScope.launch { RecentSearchRepository.forget(query) }
+        }
+
+        fun clearRecentSearches() {
+            viewModelScope.launch { RecentSearchRepository.clear() }
+        }
+
+        /**
+         * Re-runs a stored query: puts it in the field and searches it, which is what pressing a
+         * recent search is expected to do.
+         */
+        fun runRecentSearch(query: String) {
+            searchQuery = query
+            searchJob?.cancel()
+            searchJob = viewModelScope.launch { performSearch(query) }
+        }
+
+        fun loadChartPreview(kind: ChartKind = chartPreviewKind) {
+            chartPreviewKind = kind
+            viewModelScope.launch {
+                isChartPreviewLoading = true
+                val entries = fetchChart(
+                    api = api,
+                    kind = kind,
+                    genre = ChartsViewModel.chartGenres.first(),
+                    limit = CHART_PREVIEW_LENGTH,
+                    // The landing previews one market; picking another belongs to the chart screen.
+                    countryCode = "US",
+                )
+                if (kind == chartPreviewKind) {
+                    chartPreview.clear()
+                    chartPreview.addAll(entries)
+                    isChartPreviewLoading = false
+                }
+            }
+        }
+
+        /**
+         * Newest songs from artists already present in the liked list.
+         *
+         * A handful of artists rather than all of them: the endpoint is one request per artist, and
+         * this runs on the home screen's critical path. Artists with nothing new simply contribute
+         * nothing, and the songs already liked are dropped so the row is only ever new ones.
+         */
+        private suspend fun fetchLikedArtistUpdates(localLikes: List<Track>): List<Track> {
+            val artists = localLikes.asSequence()
+                .mapNotNull { it.user?.takeIf { user -> user.id > 0 } }
+                .distinctBy { it.id }
+                .take(ARTIST_UPDATE_SOURCES)
+                .toList()
+            if (artists.isEmpty()) return emptyList()
+
+            val likedIds = localLikes.mapTo(HashSet()) { it.id }
+            val fetched = coroutineScope {
+                artists.map { artist ->
+                    async {
+                        runCatching { api.getUserTracks(artist.id, limit = TRACKS_PER_ARTIST).collection }
+                            .getOrDefault(emptyList())
+                    }
+                }.awaitAll()
+            }
+
+            // At most [MAX_PER_ARTIST] songs from any one artist, while the rest of the row stays in
+            // date order. One prolific uploader was filling the whole shelf with their own newest
+            // five, which is a shelf of one artist wearing a shelf's clothes.
+            val perArtist = mutableMapOf<Long, Int>()
+            return fetched.flatten()
+                .filter { it.id > 0L && it.id !in likedIds }
+                .distinctBy { it.id }
+                // ISO 8601 sorts as text, so the newest really is last; a track with no date goes to
+                // the end rather than to the top on an empty string.
+                .sortedByDescending { it.createdAt ?: it.releaseDate ?: "" }
+                .filter { track ->
+                    val id = track.user?.id ?: 0L
+                    if (id == 0L) return@filter true
+                    val seen = perArtist.getOrDefault(id, 0)
+                    perArtist[id] = seen + 1
+                    seen < MAX_PER_ARTIST
+                }
+                .take(ARTIST_UPDATE_TOTAL)
+        }
+
+        companion object {
+            /** How many songs the landing's chart preview shows. */
+            const val CHART_PREVIEW_LENGTH = 5
+
+            /** How many liked artists are asked for new songs. One request each. */
+            const val ARTIST_UPDATE_SOURCES = 6
+
+            private const val TRACKS_PER_ARTIST = 5
+            private const val MAX_PER_ARTIST = 2
+            private const val ARTIST_UPDATE_TOTAL = 18
+        }
+
+        init {
+            loadFromCache()
+            if (isOfflineMode) {
+                isLoading = false
+            }
+
+            // The history is local, so it can be read straight away. The chart is not: asking for it
+            // with no network only produces a failed request and a spinner that never resolves, so it
+            // waits for the same ready signal the rest of the feed does.
+            observeRecentSearches()
+
+            viewModelScope.launch {
+                SessionManager.isClientIdValid.collect { isReady ->
+                    if (isReady && !isOfflineMode) {
+                        loadData()
+                        loadChartPreview()
+                    }
+                }
+            }
+            viewModelScope.launch {
+                LikeRepository.likedTracks.collect {
+                    generatePersonalizedCategories()
+                }
+            }
+        }
+
+        fun onSearchQueryChanged(query: String) {
+            searchQuery = query
+            searchJob?.cancel()
+
+            val trimmed = query.trim()
+
+            val isSoundCloudUrl = trimmed.contains("soundcloud.com") || trimmed.startsWith("soundcloud:")
+            val isSpotifyUrl = trimmed.contains("open.spotify.com") || trimmed.contains("spotify.link") ||
+                    trimmed.startsWith("spotify:") || trimmed.startsWith("spotify_") || trimmed.startsWith("station_spotify:")
+            val isYoutubeUrl = trimmed.contains("youtube.com") || trimmed.contains("youtu.be") || trimmed.startsWith("yt_radio:")
+
+            if (isSoundCloudUrl) {
+                handleSoundCloudUrl(trimmed)
+            } else if (isSpotifyUrl) {
+                handleSpotifyUrl(trimmed)
+            } else if (isYoutubeUrl) {
+                handleYoutubeUrl(trimmed)
+            } else {
+                if (trimmed.isBlank()) {
+                    clearSearchResults()
+                    return
+                }
+                searchJob = viewModelScope.launch {
+                    delay(500)
+                    performSearch(trimmed)
+                }
+            }
+        }
+
+        fun refreshData() {
+            if (isRefreshing) return
+            
+            // Network check before loading
+            if (!NetworkUtils.isInternetAvailable()) {
+                isOfflineMode = true
+                isRefreshing = false
+                return
+            }
+            
+            isOfflineMode = false
+            
+            viewModelScope.launch {
+                isRefreshing = true
+                val token = tokenManager.getAccessToken()
+                if (token.isNullOrEmpty()) loadGuestData() else loadAuthenticatedData()
+                isRefreshing = false
+            }
+        }
+
+        private suspend fun unshortenUrl(shortUrl: String): String = withContext(Dispatchers.IO) {
+            try {
+                // The shared client already follows redirects; the response is closed so its
+                // pooled connection goes back instead of leaking.
+                val client = com.alananasss.kittytune.data.network.ProxyManager.getOkHttpClient()
+                val request = Request.Builder().url(shortUrl).head().build()
+                client.newCall(request).execute().use { response -> response.request.url.toString() }
+            } catch (e: Exception) {
+                shortUrl
+            }
+        }
+    
+        private fun handleSoundCloudUrl(url: String) {
+            isSearchLoading = true
+            clearSearchResults()
+            viewModelScope.launch {
+                try {
+                    var processedUrl = url
+                    if (url.contains("on.soundcloud.com")) {
+                        processedUrl = unshortenUrl(url)
+                    }
+                    val decodedUrl = try { URLDecoder.decode(processedUrl, "UTF-8") } catch (e: Exception) { processedUrl }
+                    val stationTrackRegex = Regex("track-stations:(\\d+)")
+                    val stationArtistRegex = Regex("artist-stations:(\\d+)")
+                    val scTrackUriRegex = Regex("soundcloud:tracks:(\\d+)")
+                    val scPlaylistUriRegex = Regex("soundcloud:playlists:(\\d+)")
+                    val scUserUriRegex = Regex("soundcloud:users:(\\d+)")
+
+                    stationTrackRegex.find(decodedUrl)?.groupValues?.get(1)?.let { id ->
+                        _navigateTo.emit("station:$id"); clearSearch(); isSearchLoading = false; return@launch
+                    }
+                    stationArtistRegex.find(decodedUrl)?.groupValues?.get(1)?.let { id ->
+                        _navigateTo.emit("station_artist:$id"); clearSearch(); isSearchLoading = false; return@launch
+                    }
+                    scTrackUriRegex.find(decodedUrl)?.groupValues?.get(1)?.toLongOrNull()?.let { trackId ->
+                        val track = withContext(Dispatchers.IO) {
+                            try { api.getTracksByIds(trackId.toString()).firstOrNull() } catch (e: Exception) { null }
+                        }
+                        if (track != null) {
+                            _playTrack.emit(track); clearSearch(); isSearchLoading = false; return@launch
+                        }
+                    }
+                    scPlaylistUriRegex.find(decodedUrl)?.groupValues?.get(1)?.let { plId ->
+                        _navigateTo.emit("playlist_detail/$plId"); clearSearch(); isSearchLoading = false; return@launch
+                    }
+                    scUserUriRegex.find(decodedUrl)?.groupValues?.get(1)?.let { userId ->
+                        _navigateTo.emit("profile/$userId"); clearSearch(); isSearchLoading = false; return@launch
+                    }
+
+                    var cleanUrl = decodedUrl.substringBefore("?")
+                    if (!cleanUrl.startsWith("http://") && !cleanUrl.startsWith("https://") && cleanUrl.contains("soundcloud.com")) {
+                        cleanUrl = "https://$cleanUrl"
+                    }
+                    val resolvedObject = api.resolveUrl(cleanUrl)
+                    val kind = resolvedObject.get("kind")?.asString ?: ""
+                    when (kind) {
+                        "track" -> {
+                            val track = gson.fromJson(resolvedObject, Track::class.java); _playTrack.emit(track); clearSearch()
+                        }
+                        "playlist", "album" -> {
+                            val playlist = gson.fromJson(resolvedObject, Playlist::class.java); _navigateTo.emit("playlist_detail/${playlist.id}")
+                        }
+                        "user" -> {
+                            val user = gson.fromJson(resolvedObject, User::class.java); _navigateTo.emit("profile/${user.id}")
+                        }
+                        "system-playlist" -> {
+                            val uri = resolvedObject.get("uri")?.asString ?: ""
+                            val trackStationId = stationTrackRegex.find(uri)?.groupValues?.get(1)
+                            val artistStationId = stationArtistRegex.find(uri)?.groupValues?.get(1)
+                            if (trackStationId != null) {
+                                _navigateTo.emit("station:$trackStationId"); clearSearch()
+                            } else if (artistStationId != null) {
+                                _navigateTo.emit("station_artist:$artistStationId"); clearSearch()
+                            } else {
+                                performSearch(url)
+                            }
+                        }
+                        else -> performSearch(url)
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace(); performSearch(url)
+                }
+            }
+        }
+
+        private fun handleSpotifyUrl(url: String) {
+            isSearchLoading = true
+            clearSearchResults()
+            viewModelScope.launch {
+                try {
+                    var processedUrl = url
+                    if (processedUrl.contains("spotify.link")) {
+                        processedUrl = unshortenUrl(processedUrl)
+                    }
+                    val decodedUrl = try { URLDecoder.decode(processedUrl, "UTF-8") } catch (e: Exception) { processedUrl }
+                    val cleanUrl = decodedUrl.substringBefore("?")
+
+                    val stationTrackRegex = Regex("(?:spotify:station:track:|station/track/|spotify_radio:|station_spotify:)([a-zA-Z0-9]+)")
+                    val stationArtistRegex = Regex("(?:spotify:station:artist:|station/artist/)([a-zA-Z0-9]+)")
+                    stationTrackRegex.find(cleanUrl)?.groupValues?.get(1)?.let { id ->
+                        _navigateTo.emit("playlist_detail/spotify_radio:$id")
+                        clearSearch()
+                        isSearchLoading = false
+                        return@launch
+                    }
+                    stationArtistRegex.find(cleanUrl)?.groupValues?.get(1)?.let { id ->
+                        _navigateTo.emit("playlist_detail/spotify_radio:$id")
+                        clearSearch()
+                        isSearchLoading = false
+                        return@launch
+                    }
+
+                    // Regionalized share URLs (open.spotify.com/intl-fr/track/...)
+                    // are matched by the optional intl-xx path segment.
+                    val trackRegex = Regex("(?:spotify:track:|spotify_track:|open\\.spotify\\.com/(?:intl-[a-zA-Z]+/)?track/)([a-zA-Z0-9]+)")
+                    trackRegex.find(cleanUrl)?.groupValues?.get(1)?.let { trackId ->
+                        val spotifyTrack = withContext(Dispatchers.IO) {
+                            com.alananasss.kittytune.data.spotify.SpotifyRepository.getTrack(trackId)
+                        }
+                        if (spotifyTrack != null) {
+                            _playTrack.emit(spotifyTrack.toTrack())
+                            clearSearch()
+                            isSearchLoading = false
+                            return@launch
+                        }
+                    }
+
+                    val playlistRegex = Regex("(?:spotify:playlist:|spotify_playlist:|open\\.spotify\\.com/(?:intl-[a-zA-Z]+/)?playlist/)([a-zA-Z0-9]+)")
+                    playlistRegex.find(cleanUrl)?.groupValues?.get(1)?.let { playlistId ->
+                        _navigateTo.emit("playlist_detail/spotify:playlist:$playlistId")
+                        clearSearch()
+                        isSearchLoading = false
+                        return@launch
+                    }
+
+                    val albumRegex = Regex("(?:spotify:album:|spotify_album:|open\\.spotify\\.com/(?:intl-[a-zA-Z]+/)?album/)([a-zA-Z0-9]+)")
+                    albumRegex.find(cleanUrl)?.groupValues?.get(1)?.let { albumId ->
+                        _navigateTo.emit("playlist_detail/spotify:album:$albumId")
+                        clearSearch()
+                        isSearchLoading = false
+                        return@launch
+                    }
+
+                    val artistRegex = Regex("(?:spotify:artist:|spotify_artist:|open\\.spotify\\.com/(?:intl-[a-zA-Z]+/)?artist/)([a-zA-Z0-9]+)")
+                    artistRegex.find(cleanUrl)?.groupValues?.get(1)?.let { artistId ->
+                        _navigateTo.emit("spotify_artist:$artistId")
+                        clearSearch()
+                        isSearchLoading = false
+                        return@launch
+                    }
+
+                    performSearch(url)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    performSearch(url)
+                } finally {
+                    isSearchLoading = false
+                }
+            }
+        }
+    
+        var searchTrigger by mutableStateOf(0)
+        fun activateSearch() { isSearching = true; searchTrigger++ }
+        fun clearSearch() { searchQuery = ""; isSearching = false; clearSearchResults() }
+        fun onFilterChanged(filter: SearchFilter) { activeFilter = filter; if (searchQuery.isNotBlank()) { searchJob?.cancel(); searchJob = viewModelScope.launch { performSearch(searchQuery) } } }
+    
+        fun onSearchSourceChanged(source: SearchSource) {
+            if (activeSearchSource == source) return
+            activeSearchSource = source
+            if (searchQuery.isNotBlank()) {
+                searchJob?.cancel()
+                searchJob = viewModelScope.launch { performSearch(searchQuery) }
+            }
+        }
+    
+        private fun clearSearchResults() {
+            searchResultsTracks.clear(); searchResultsArtists.clear(); searchResultsPlaylists.clear(); searchResultsYoutube.clear(); searchResultsYoutubeMusic.clear()
+            youtubeMusicContinuation = null
+            searchResultsSpotify.clear(); searchResultsSpotifyAlbums.clear(); searchResultsSpotifyPlaylists.clear(); searchResultsSpotifyArtists.clear()
+            searchResultsDeezerTracks.clear(); searchResultsDeezerAlbums.clear(); searchResultsDeezerPlaylists.clear(); searchResultsDeezerArtists.clear()
+            searchResultsTidalTracks.clear(); searchResultsTidalAlbums.clear(); searchResultsTidalPlaylists.clear(); searchResultsTidalArtists.clear()
+            searchResultsQobuzTracks.clear(); searchResultsQobuzAlbums.clear(); searchResultsQobuzPlaylists.clear(); searchResultsQobuzArtists.clear()
+            searchResultsApple.clear()
+            yandexNotice = null
+            tracksNextUrl = null; artistsNextUrl = null; playlistsNextUrl = null
+        }
+    
+        private suspend fun performSearch(query: String) {
+            isSearchLoading = true; clearSearchResults()
+            // The field searches as you type, so this is the first moment a query becomes a search
+            // rather than a prefix. Recording it here is what keeps "lo" out of the history.
+            recordSearch(query)
+            try {
+                when (activeSearchSource) {
+                    SearchSource.SOUNDCLOUD -> performSoundCloudSearch(query)
+                    SearchSource.YOUTUBE -> performYoutubeSearch(query)
+                    SearchSource.YOUTUBE_MUSIC -> performYoutubeMusicSearch(query)
+                    SearchSource.SPOTIFY -> performSpotifySearch(query)
+                    SearchSource.APPLE_MUSIC -> performAppleMusicSearch(query)
+                    SearchSource.YANDEX_MUSIC -> performYandexSearch(query)
+                    SearchSource.DEEZER -> performDeezerSearch(query)
+                    SearchSource.TIDAL -> performTidalSearch(query)
+                    SearchSource.QOBUZ -> performQobuzSearch(query)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            } finally {
+                isSearchLoading = false
+            }
+        }
+
+        private suspend fun performDeezerSearch(query: String) {
+            withContext(Dispatchers.IO) {
+                try {
+                    val result = com.alananasss.kittytune.data.deezer.DeezerSearchRepository.search(query, limit = 50)
+                    withContext(Dispatchers.Main) {
+                        searchResultsDeezerTracks.clear()
+                        searchResultsDeezerTracks.addAll(result.tracks)
+                        searchResultsDeezerAlbums.clear()
+                        searchResultsDeezerAlbums.addAll(result.albums)
+                        searchResultsDeezerPlaylists.clear()
+                        searchResultsDeezerPlaylists.addAll(result.playlists)
+                        searchResultsDeezerArtists.clear()
+                        searchResultsDeezerArtists.addAll(result.artists)
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+
+        private suspend fun performTidalSearch(query: String) {
+            withContext(Dispatchers.IO) {
+                try {
+                    val result = com.alananasss.kittytune.data.tidal.TidalSearchRepository.search(query, limit = 50)
+                    withContext(Dispatchers.Main) {
+                        searchResultsTidalTracks.clear()
+                        searchResultsTidalTracks.addAll(result.tracks)
+                        searchResultsTidalAlbums.clear()
+                        searchResultsTidalAlbums.addAll(result.albums)
+                        searchResultsTidalPlaylists.clear()
+                        searchResultsTidalPlaylists.addAll(result.playlists)
+                        searchResultsTidalArtists.clear()
+                        searchResultsTidalArtists.addAll(result.artists)
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+
+        private suspend fun performQobuzSearch(query: String) {
+            withContext(Dispatchers.IO) {
+                try {
+                    val result = com.alananasss.kittytune.data.qobuz.QobuzSearchRepository.search(query, limit = 50)
+                    withContext(Dispatchers.Main) {
+                        searchResultsQobuzTracks.clear()
+                        searchResultsQobuzTracks.addAll(result.tracks)
+                        searchResultsQobuzAlbums.clear()
+                        searchResultsQobuzAlbums.addAll(result.albums)
+                        searchResultsQobuzPlaylists.clear()
+                        searchResultsQobuzPlaylists.addAll(result.playlists)
+                        searchResultsQobuzArtists.clear()
+                        searchResultsQobuzArtists.addAll(result.artists)
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+
+        /**
+         * Apple Music hits for [query].
+         *
+         * No failure handling of its own beyond an empty list, because the client already answers null for
+         * everything that can go wrong — the token expiring, the web player changing shape, the network.
+         * An Apple failure looks the same as Apple having nothing, which is the only safe way for a source
+         * that depends on scraping to behave (issue #33).
+         */
+        private suspend fun performAppleMusicSearch(query: String) {
+            val songs = com.alananasss.kittytune.data.applemusic.AppleMusicClient.searchSongs(query, limit = 25)
+            withContext(Dispatchers.Main) {
+                searchResultsApple.clear()
+                searchResultsApple.addAll(songs)
+            }
+        }
+
+        /**
+         * Finds [song] on a source that streams and hands the result to [onResolved].
+         *
+         * The id of the row being worked on is published so it can show that something is happening: this
+         * is a search inside a click, and it takes as long as a search does. [onResolved] is called with
+         * null when nothing close enough was found, which the caller should say out loud rather than
+         * swallow — a press that silently does nothing is the complaint this whole feature came from.
+         */
+        fun resolveAppleSong(
+            song: com.alananasss.kittytune.data.catalog.CatalogSong,
+            onResolved: (Track?) -> Unit,
+        ) {
+            if (resolvingAppleSongId != null) return
+            resolvingAppleSongId = song.key
+            viewModelScope.launch {
+                val track = try {
+                    com.alananasss.kittytune.data.catalog.CatalogFallback.resolve(song)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    null
+                }
+                resolvingAppleSongId = null
+                onResolved(track)
+            }
+        }
+
+        /**
+         * Yandex hits for [query].
+         *
+         * The only search here that can fail in a way worth saying out loud. Apple's either answers or does
+         * not; Yandex has two states that look identical as an empty list and are not — no token stored, and
+         * a country it does not serve (HTTP 451, which it returns with or without a token). Somebody searching
+         * from Berlin and getting silence would reasonably conclude the feature is broken (issue #33).
+         */
+        private suspend fun performYandexSearch(query: String) {
+            val result = com.alananasss.kittytune.data.yandex.YandexMusicClient.searchSongs(query)
+            withContext(Dispatchers.Main) {
+                searchResultsApple.clear()
+                yandexNotice = when (result) {
+                    is com.alananasss.kittytune.data.yandex.YandexMusicClient.Result.Found -> {
+                        searchResultsApple.addAll(result.songs)
+                        null
+                    }
+                    com.alananasss.kittytune.data.yandex.YandexMusicClient.Result.NotConnected ->
+                        YandexNotice.NOT_CONNECTED
+                    com.alananasss.kittytune.data.yandex.YandexMusicClient.Result.RegionBlocked ->
+                        YandexNotice.REGION_BLOCKED
+                    com.alananasss.kittytune.data.yandex.YandexMusicClient.Result.Failed ->
+                        YandexNotice.FAILED
+                }
+            }
+        }
+
+        private suspend fun performSpotifySearch(query: String) {
+            withContext(Dispatchers.IO) {
+                try {
+                    val results = com.alananasss.kittytune.data.spotify.SpotifyRepository.search(query, limit = 30)
+                    val artistMap = results.artists.associateBy { it.id }
+                    val mappedTracks = results.tracks.map { track ->
+                        val enrichedArtists = track.artists.map { a ->
+                            val matched = artistMap[a.id]
+                            if (matched != null) {
+                                a.copy(
+                                    verified = matched.verified,
+                                    avatarUrl = matched.avatarUrl ?: a.avatarUrl
+                                )
+                            } else a
+                        }
+                        val firstA = enrichedArtists.firstOrNull()
+                        val baseTrack = track.copy(artists = enrichedArtists).toTrack()
+                        if (firstA != null) {
+                            baseTrack.copy(
+                                artists = enrichedArtists,
+                                user = baseTrack.user?.copy(
+                                    verified = firstA.verified,
+                                    avatarUrl = firstA.avatarUrl ?: baseTrack.user?.avatarUrl
+                                )
+                            )
+                        } else {
+                            baseTrack.copy(artists = enrichedArtists)
+                        }
+                    }
+                    withContext(Dispatchers.Main) {
+                        searchResultsSpotify.clear()
+                        searchResultsSpotify.addAll(mappedTracks)
+                        searchResultsSpotifyAlbums.clear()
+                        searchResultsSpotifyAlbums.addAll(results.albums)
+                        searchResultsSpotifyPlaylists.clear()
+                        searchResultsSpotifyPlaylists.addAll(results.playlists)
+                        searchResultsSpotifyArtists.clear()
+                        searchResultsSpotifyArtists.addAll(results.artists)
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+    
+        private suspend fun fetchYoutubeRecommendations(seedTrack: Track): List<Track> {
+            return withContext(Dispatchers.IO) {
+                try {
+                    val cleanTitle = seedTrack.title?.replace(Regex("(?i)(\\[.*?\\]|\\(.*?\\))"), "")?.trim() ?: ""
+                    val artistName = seedTrack.user?.username ?: ""
+                    val query = "$cleanTitle $artistName audio"
+    
+                    com.alananasss.kittytune.data.StreamResolver.init()
+                    val result = try {
+                        val youtubeService = org.schabi.newpipe.extractor.ServiceList.YouTube
+                        val searchInfo = org.schabi.newpipe.extractor.search.SearchInfo.getInfo(
+                            youtubeService, 
+                            youtubeService.searchQHFactory.fromQuery(query, listOf("videos"), "")
+                        )
+                        searchInfo.relatedItems.filterIsInstance<org.schabi.newpipe.extractor.stream.StreamInfoItem>()
+                    } catch (e: Exception) {
+                        emptyList()
+                    }
+                    
+                    result.mapNotNull { item ->
+                        Track(
+                            id = item.url.hashCode().toLong(),
+                            title = item.name,
+                            user = User(0L, item.uploaderName ?: "YouTube", null),
+                            artworkUrl = item.thumbnails.firstOrNull()?.url,
+                            durationMs = item.duration * 1000L,
+                            permalinkUrl = item.url,
+                            source = "youtube"
+                        )
+                    }.take(5)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    emptyList()
+                }
+            }
+        }
+    
+        private suspend fun performYoutubeSearch(query: String) {
+            withContext(Dispatchers.IO) {
+                try {
+                    com.alananasss.kittytune.data.StreamResolver.init()
+                    val youtubeService = org.schabi.newpipe.extractor.ServiceList.YouTube
+                    val searchInfo = org.schabi.newpipe.extractor.search.SearchInfo.getInfo(
+                        youtubeService, 
+                        youtubeService.searchQHFactory.fromQuery(query, listOf("videos"), "")
+                    )
+    
+                    val mappedTracks = searchInfo.relatedItems.filterIsInstance<org.schabi.newpipe.extractor.stream.StreamInfoItem>().mapNotNull { item ->
+                        Track(
+                            id = item.url.hashCode().toLong(),
+                            title = item.name,
+                            user = User(0L, item.uploaderName ?: "YouTube", null),
+                            artworkUrl = item.thumbnails.firstOrNull()?.url,
+                            durationMs = item.duration * 1000L,
+                            permalinkUrl = item.url,
+                            source = "youtube"
+                        )
+                    }
+    
+                    withContext(Dispatchers.Main) {
+                        searchResultsYoutube.clear()
+                        searchResultsYoutube.addAll(mappedTracks)
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+
+        private suspend fun performYoutubeMusicSearch(query: String) {
+            withContext(Dispatchers.IO) {
+                try {
+                    val result = com.zionhuang.innertube.YouTube.search(
+                        query,
+                        com.zionhuang.innertube.YouTube.SearchFilter.FILTER_SONG
+                    ).getOrNull()
+                    youtubeMusicContinuation = result?.continuation
+                    val songs = result?.items?.filterIsInstance<com.zionhuang.innertube.models.SongItem>().orEmpty()
+                    val mappedTracks = songs.map { song ->
+                        val videoUrl = "https://www.youtube.com/watch?v=${song.id}"
+                        Track(
+                            id = kotlin.math.abs(videoUrl.hashCode().toLong()).coerceAtLeast(1L),
+                            title = song.title,
+                            user = User(0L, song.artists.joinToString(", ") { it.name }, null),
+                            artworkUrl = song.thumbnail,
+                            durationMs = (song.duration ?: 0) * 1000L,
+                            permalinkUrl = videoUrl,
+                            source = "youtube_music"
+                        )
+                    }
+
+                    withContext(Dispatchers.Main) {
+                        searchResultsYoutubeMusic.clear()
+                        searchResultsYoutubeMusic.addAll(mappedTracks)
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+        private suspend fun performSoundCloudSearch(query: String) {
+            coroutineScope {
+                when (activeFilter) {
+                    SearchFilter.ALL -> {
+                        val tracksDef = async { try { api.searchTracks(query, limit = 5) } catch (e: Exception) { null } }
+                        val usersDef = async { try { api.searchUsers(query, limit = 5) } catch (e: Exception) { null } }
+                        val playlistsDef = async { try { api.searchPlaylists(query, limit = 5) } catch (e: Exception) { null } }
+    
+                        tracksDef.await()?.let { searchResultsTracks.addAll(it.collection); tracksNextUrl = it.next_href }
+                        usersDef.await()?.let { searchResultsArtists.addAll(it.collection); artistsNextUrl = it.next_href }
+                        playlistsDef.await()?.let { searchResultsPlaylists.addAll(it.collection); playlistsNextUrl = it.next_href }
+                    }
+                    SearchFilter.TRACKS -> {
+                        val response = api.searchTracks(query, limit = 30); searchResultsTracks.addAll(response.collection); tracksNextUrl = response.next_href
+                    }
+                    SearchFilter.ARTISTS -> {
+                        val response = api.searchUsers(query, limit = 30); searchResultsArtists.addAll(response.collection); artistsNextUrl = response.next_href
+                    }
+                    SearchFilter.PLAYLISTS -> {
+                        val response = api.searchPlaylists(query, limit = 30); searchResultsPlaylists.addAll(response.collection); playlistsNextUrl = response.next_href
+                    }
+                }
+            }
+        }
+    
+        fun loadMoreSearchResults() {
+            if (isSearchLoadingMore) return
+            viewModelScope.launch {
+                isSearchLoadingMore = true
+                try {
+                    when (activeFilter) {
+                        SearchFilter.TRACKS -> {
+                            if (tracksNextUrl != null) {
+                                val response = api.getSearchTracksNextPage(tracksNextUrl!!); searchResultsTracks.addAll(response.collection); tracksNextUrl = response.next_href
+                            }
+                        }
+                        SearchFilter.ARTISTS -> {
+                            if (artistsNextUrl != null) {
+                                val response = api.getSearchUsersNextPage(artistsNextUrl!!); searchResultsArtists.addAll(response.collection); artistsNextUrl = response.next_href
+                            }
+                        }
+                        SearchFilter.PLAYLISTS -> {
+                            if (playlistsNextUrl != null) {
+                                val response = api.getSearchPlaylistsNextPage(playlistsNextUrl!!); searchResultsPlaylists.addAll(response.collection); playlistsNextUrl = response.next_href
+                            }
+                        }
+                        else -> {}
+                    }
+                    if (activeSearchSource == SearchSource.YOUTUBE_MUSIC && youtubeMusicContinuation != null) {
+                        val cont = youtubeMusicContinuation ?: return@launch
+                        withContext(Dispatchers.IO) {
+                            val res = com.zionhuang.innertube.YouTube.searchContinuation(cont).getOrNull()
+                            youtubeMusicContinuation = res?.continuation
+                            val moreSongs = res?.items?.filterIsInstance<com.zionhuang.innertube.models.SongItem>().orEmpty()
+                            val moreMapped = moreSongs.map { song ->
+                                val videoUrl = "https://www.youtube.com/watch?v=${song.id}"
+                                Track(
+                                    id = kotlin.math.abs(videoUrl.hashCode().toLong()).coerceAtLeast(1L),
+                                    title = song.title,
+                                    user = User(0L, song.artists.joinToString(", ") { it.name }, null),
+                                    artworkUrl = song.thumbnail,
+                                    durationMs = (song.duration ?: 0) * 1000L,
+                                    permalinkUrl = videoUrl,
+                                    source = "youtube_music"
+                                )
+                            }
+                            withContext(Dispatchers.Main) {
+                                searchResultsYoutubeMusic.addAll(moreMapped)
+                            }
+                        }
+                    }
+                } catch (e: Exception) { e.printStackTrace() } finally { isSearchLoadingMore = false }
+            }
+        }
+    
+        private fun getHomeCacheKey(): String {
+            val langCode = com.alananasss.kittytune.core.Strings.resolvedLanguage
+            return "cached_home_data_$langCode"
+        }
+
+        private fun loadFromCache() {
+            try {
+                val json = prefs.getString(getHomeCacheKey(), null)
+                if (json != null) {
+                    val data: HomeCacheData = gson.fromJson(json, object : TypeToken<HomeCacheData>() {}.type)
+                    userProfile = data.user
+                    if (data.sections.isNotEmpty()) {
+                        homeSections.clear()
+                        data.sections.forEach { section ->
+                            val content: List<Any> = when (section.type) {
+                                SectionType.TRACKS_ROW -> section.tracks
+                                SectionType.STATIONS_ROW -> section.playlists
+                                SectionType.ARTISTS_ROW -> section.users
+                                SectionType.DISCOVERY_ROW -> section.tracks
+                                SectionType.HIGHLIGHT_ROW -> section.tracks
+                            }
+                            if (content.isNotEmpty()) homeSections.add(HomeSection(section.title, section.subtitle, content, section.type))
+                        }
+                    }
+                }
+            } catch (e: Exception) { e.printStackTrace() }
+        }
+    
+        private fun saveToCache() {
+            viewModelScope.launch {
+                try {
+                    val sectionsCache = homeSections.map { section -> HomeSectionCache(section.title, section.subtitle, section.type, section.content.filterIsInstance<Track>(), section.content.filterIsInstance<Playlist>(), section.content.filterIsInstance<User>()) }
+                    val data = HomeCacheData(userProfile, sectionsCache)
+                    prefs.putString(getHomeCacheKey(), gson.toJson(data))
+                } catch (e: Exception) { e.printStackTrace() }
+            }
+        }
+
+        private fun extractYoutubeVideoId(url: String): String? {
+            val pattern = "(?<=watch\\?v=|/videos/|embed/|youtu.be/|/v/|/e/|watch\\?v%3D|watch\\?feature=player_embedded&v=|%2Fvideos%2F|embed%\u200C\u200B2F|youtu.be%2F|%2Fv%2F)[^#&?\\n]*"
+            val compiledPattern = Pattern.compile(pattern)
+            val matcher = compiledPattern.matcher(url)
+            return if (matcher.find()) matcher.group() else null
+        }
+
+        private fun handleYoutubeUrl(url: String) {
+            isSearchLoading = true
+            clearSearchResults()
+            viewModelScope.launch {
+                try {
+                    if (url.contains("list=") || url.contains("radio")) {
+                        val encodedUrl = java.net.URLEncoder.encode(url, "UTF-8")
+                        _navigateTo.emit("playlist_detail/yt_radio:$encodedUrl")
+                        clearSearch()
+                        isSearchLoading = false
+                        return@launch
+                    }
+
+                    val videoId = extractYoutubeVideoId(url)
+                    if (videoId != null) {
+                        val track = withContext(Dispatchers.IO) {
+                            try {
+                                com.alananasss.kittytune.data.StreamResolver.init()
+                                val youtubeService = org.schabi.newpipe.extractor.ServiceList.YouTube
+                                val streamInfo = org.schabi.newpipe.extractor.stream.StreamInfo.getInfo(
+                                    youtubeService, 
+                                    "https://youtube.com/watch?v=$videoId"
+                                )
+        
+                                val title = streamInfo.name ?: "YouTube Track"
+                                val author = streamInfo.uploaderName ?: "YouTube"
+                                val art = streamInfo.thumbnails.firstOrNull()?.url ?: "https://img.youtube.com/vi/$videoId/maxresdefault.jpg"
+                                val durationMs = streamInfo.duration * 1000L
+        
+                                Track(
+                                    id = videoId.hashCode().toLong(),
+                                    title = title,
+                                    user = User(0L, author, null),
+                                    artworkUrl = art,
+                                    durationMs = durationMs,
+                                    permalinkUrl = url,
+                                    source = "youtube"
+                                )
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                                null
+                            }
+                        }
+
+                        if (track != null) {
+                            _playTrack.emit(track)
+                            clearSearch()
+                        } else {
+                            performSearch(url)
+                        }
+                    } else {
+                        performSearch(url)
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    performSearch(url)
+                } finally {
+                    isSearchLoading = false
+                }
+            }
+        }
+
+        fun loadData() {
+            if (!NetworkUtils.isInternetAvailable()) {
+                isOfflineMode = true
+                isLoading = false
+                return
+            }
+            isOfflineMode = false
+            
+            viewModelScope.launch {
+                val token = tokenManager.getAccessToken()
+                if (token.isNullOrEmpty()) loadGuestData() else loadAuthenticatedData()
+            }
+        }
+    
+        private suspend fun fetchDiscoverySection(localLikes: List<Track>): HomeSection? {
+            return try {
+                val seedTrack = if (localLikes.isNotEmpty()) {
+                    localLikes.random()
+                } else {
+                    api.getCharts(limit = 10).collection.mapNotNull { it.track }.randomOrNull()
+                }
+    
+                if (seedTrack == null) return null
+    
+                val related = api.getRelatedTracks(seedTrack.id, limit = 20)
+                val discoveryTracks = related.collection
+                    .filter { it.id != seedTrack.id }
+                    .shuffled()
+                    .take(8)
+    
+                if (discoveryTracks.isNotEmpty()) {
+                    HomeSection(
+                        title = str("home_discovery_title"),
+                        subtitle = str("home_discovery_subtitle"),
+                        content = discoveryTracks,
+                        type = SectionType.DISCOVERY_ROW
+                    )
+                } else {
+                    null
+                }
+            } catch (e: Exception) {
+                null
+            }
+        }
+    
+        private suspend fun fetchHistoryBasedSection(): HomeSection? {
+            return try {
+                val history = HistoryRepository.getHistory().first()
+                val recentTracks = history.filter { it.type == "TRACK" }.take(10)
+                if (recentTracks.isEmpty()) return null
+    
+                val seedItem = recentTracks.random()
+                val seedTrack = Track(
+                    id = seedItem.numericId,
+                    title = seedItem.title,
+                    user = User(0L, seedItem.subtitle, null),
+                    artworkUrl = seedItem.imageUrl,
+                    durationMs = 0L,
+                    source = (seedItem.source as? String) ?: "soundcloud",
+                    permalinkUrl = seedItem.originalUrl
+                )
+    
+                coroutineScope {
+                    val relatedSCDef = async {
+                        try {
+                            if (seedTrack.source == "soundcloud") {
+                                api.getRelatedTracks(seedTrack.id, limit = 10).collection
+                            } else {
+                                api.searchTracks(seedTrack.title ?: "", limit = 10).collection
+                            }
+                        } catch (e: Exception) { emptyList() }
+                    }
+                    val relatedYTDef = async {
+                        fetchYoutubeRecommendations(seedTrack)
+                    }
+    
+                    val relatedSC = relatedSCDef.await()
+                    val relatedYT = relatedYTDef.await()
+                    val mixed = (relatedSC + relatedYT).shuffled()
+    
+                    if (mixed.isNotEmpty()) {
+                        HomeSection(
+                            title = str("home_section_similar", seedItem.title),
+                            subtitle = str("home_section_similar_sub"),
+                            content = mixed,
+                            type = SectionType.TRACKS_ROW
+                        )
+                    } else null
+                }
+            } catch (e: Exception) { null }
+        }
+
+        private suspend fun fetchPersonalizedSections(sourceTracks: List<Track>, username: String): List<HomeSection> {
+            val sections = mutableStateListOf<HomeSection>()
+
+            val historyItems = try { HistoryRepository.getHistory().first() } catch (e: Exception) { emptyList() }
+
+            val recentTracks = historyItems.filter { it.type == "TRACK" }.take(20).map {
+                Track(
+                    id = it.numericId,
+                    title = it.title,
+                    artworkUrl = it.imageUrl,
+                    durationMs = 0L,
+                    user = User(0, it.subtitle, null),
+                    source = it.source,
+                    permalinkUrl = it.originalUrl
+                )
+            }
+
+            try {
+                coroutineScope {
+                    if (recentTracks.isNotEmpty()) {
+                        val habitSeeds = recentTracks.distinctBy { it.id }.take(10)
+                        val habitStations = habitSeeds.map { track ->
+                            val isYoutube = track.source == "youtube" && !track.permalinkUrl.isNullOrEmpty()
+                            val isSpotify = track.source == "spotify" || (track.permalinkUrl != null && track.permalinkUrl!!.contains("spotify"))
+                            val spotifyTrackId = if (isSpotify) {
+                                track.permalink?.ifBlank { null }
+                                    ?: track.permalinkUrl?.substringAfter("track/")?.substringBefore("?")?.substringBefore("/")
+                                    ?: track.user?.urn?.removePrefix("spotify:track:")
+                                    ?: track.id.toString()
+                            } else null
+                            val permalink = if (isYoutube) {
+                                "yt_radio:${track.permalinkUrl}"
+                            } else if (isSpotify && spotifyTrackId != null) {
+                                "spotify_radio:$spotifyTrackId"
+                            } else {
+                                "track_station_marker"
+                            }
+                            Playlist(
+                                id = track.id,
+                                title = str("home_station_track_title", track.title ?: ""),
+                                artworkUrl = track.fullResArtwork,
+                                calculatedArtworkUrl = null,
+                                trackCount = 0,
+                                user = track.user,
+                                permalinkUrl = permalink
+                            )
+                        }
+                        if (habitStations.isNotEmpty()) {
+                            sections.add(HomeSection(str("home_habits_title"), str("home_habits_sub"), habitStations, SectionType.STATIONS_ROW))
+                        }
+                    }
+
+                    if (sourceTracks.isNotEmpty()) {
+                        val rediscoverySeeds = sourceTracks.shuffled().take(10)
+                        val rediscoveryStations = rediscoverySeeds.map { track ->
+                            val isYoutube = track.source == "youtube" && !track.permalinkUrl.isNullOrEmpty()
+                            val isSpotify = track.source == "spotify" || (track.permalinkUrl != null && track.permalinkUrl!!.contains("spotify"))
+                            val spotifyTrackId = if (isSpotify) {
+                                track.permalink?.ifBlank { null }
+                                    ?: track.permalinkUrl?.substringAfter("track/")?.substringBefore("?")?.substringBefore("/")
+                                    ?: track.user?.urn?.removePrefix("spotify:track:")
+                                    ?: track.id.toString()
+                            } else null
+                            val permalink = if (isYoutube) {
+                                "yt_radio:${track.permalinkUrl}"
+                            } else if (isSpotify && spotifyTrackId != null) {
+                                "spotify_radio:$spotifyTrackId"
+                            } else {
+                                "track_station_marker"
+                            }
+                            Playlist(
+                                id = track.id,
+                                title = str("home_station_track_title", track.title ?: ""),
+                                artworkUrl = track.fullResArtwork,
+                                calculatedArtworkUrl = null,
+                                trackCount = 0,
+                                user = track.user,
+                                permalinkUrl = permalink
+                            )
+                        }
+                        if (rediscoveryStations.isNotEmpty()) {
+                            sections.add(HomeSection(str("home_rediscovery_title"), str("home_rediscovery_sub"), rediscoveryStations, SectionType.STATIONS_ROW))
+                        }
+                    }
+
+                    val recommendedAlbumsDef = async {
+                        val finalAlbumList = mutableListOf<Playlist>()
+                        try {
+                            val favoriteArtistIds = sourceTracks.mapNotNull { it.user?.id }.distinct().shuffled().take(5)
+                            if (favoriteArtistIds.isNotEmpty()) {
+                                val artistAlbums = favoriteArtistIds.map { artistId ->
+                                    async { try { api.getUserAlbums(artistId).collection } catch (e: Exception) { emptyList() } }
+                                }.map { it.await() }.flatten()
+                                finalAlbumList.addAll(artistAlbums)
+                            }
+
+                            val topGenres = sourceTracks.mapNotNull { it.genre }.filter { it.isNotBlank() }
+                                .groupingBy { it }.eachCount()
+                                .toList().sortedByDescending { it.second }.take(2).map { it.first }
+
+                            if (topGenres.isNotEmpty()) {
+                                val genreAlbums = topGenres.map { genre ->
+                                    async { try { api.searchAlbums(genre, limit = 5).collection } catch (e: Exception) { emptyList() } }
+                                }.map { it.await() }.flatten()
+                                finalAlbumList.addAll(genreAlbums)
+                            }
+                        } catch (e: Exception) {
+                            finalAlbumList.addAll(api.searchAlbums(str("home_top_albums_query"), limit = 10).collection)
+                        }
+                        finalAlbumList.distinctBy { it.id }.shuffled().take(10)
+                    }
+
+                    val artistStationsDef = async {
+                        val artistCandidates = sourceTracks.mapNotNull { it.user }
+                            .distinctBy { it.id }
+                            .filter { it.id > 0 }
+                            .shuffled()
+                            .take(5)
+
+                        if (artistCandidates.isNotEmpty()) {
+                            artistCandidates.map { artist ->
+                                Playlist(
+                                    id = artist.id,
+                                    title = str("home_station_artist_title", artist.username ?: ""),
+                                    artworkUrl = artist.avatarUrl,
+                                    calculatedArtworkUrl = null,
+                                    trackCount = 0,
+                                    user = artist,
+                                    permalinkUrl = "artist_station_marker"
+                                )
+                            }
+                        } else {
+                            emptyList()
+                        }
+                    }
+
+                    val likedByDef = async {
+                        val candidateIds = sourceTracks.mapNotNull { it.user?.id }.distinct().shuffled().take(10)
+                        val validatedUsersDeferred = candidateIds.map { userId ->
+                            async { try { val userFull = api.getUser(userId); if (userFull.likesCount > 0) userFull else null } catch (e: Exception) { null } }
+                        }
+                        val validatedUsers = validatedUsersDeferred.mapNotNull { it.await() }
+
+                        if (validatedUsers.isNotEmpty()) {
+                            validatedUsers.map { user ->
+                                Playlist(
+                                    id = user.id,
+                                    title = str("home_liked_by_user_title", user.username ?: ""),
+                                    artworkUrl = user.avatarUrl,
+                                    calculatedArtworkUrl = null,
+                                    trackCount = user.likesCount,
+                                    user = user,
+                                    permalinkUrl = "liked_by_marker"
+                                )
+                            }
+                        } else {
+                            emptyList()
+                        }
+                    }
+
+                    val seed1 = sourceTracks.take(10).randomOrNull() ?: sourceTracks.first()
+                    val relatedDef1 = async {
+                        try {
+                            if (seed1.source == "soundcloud") {
+                                api.getRelatedTracks(seed1.id, limit = 10).collection
+                            } else {
+                                api.searchTracks(seed1.title ?: "", limit = 10).collection
+                            }
+                        } catch (e: Exception) { emptyList() }
+                    }
+
+                    val newCrewDef = async {
+                        val artists = sourceTracks.mapNotNull { it.user }.distinctBy { it.id }.shuffled().take(8)
+                        val similarArtists = try {
+                            val randomLike = sourceTracks.shuffled().first()
+                            api.getRelatedTracks(randomLike.id, limit=10).collection.mapNotNull { it.user }
+                        } catch(e:Exception) { emptyList() }
+                        (artists + similarArtists).distinctBy { it.id }.shuffled().take(10)
+                    }
+
+                    val recommendedAlbums = recommendedAlbumsDef.await()
+                    if (recommendedAlbums.isNotEmpty()) {
+                        sections.add(HomeSection(str("home_albums_for_you"), null, recommendedAlbums, SectionType.STATIONS_ROW))
+                    }
+
+                    val artistStations = artistStationsDef.await()
+                    if(artistStations.isNotEmpty()){
+                        sections.add(HomeSection(str("home_discover_stations"), str("home_section_new_crew_sub"), artistStations, SectionType.STATIONS_ROW))
+                    }
+
+                    val likedByItems = likedByDef.await()
+                    if (likedByItems.isNotEmpty()) {
+                        sections.add(HomeSection(str("home_liked_by_section_title"), str("home_liked_by_section_subtitle"), likedByItems, SectionType.STATIONS_ROW))
+                    }
+
+                    val related1 = relatedDef1.await()
+                    if (related1.isNotEmpty()) sections.add(HomeSection(str("home_section_similar", seed1.title ?: ""), str("home_section_similar_sub"), related1, SectionType.TRACKS_ROW))
+
+                    val newCrew = newCrewDef.await()
+                    if (newCrew.isNotEmpty()) sections.add(HomeSection(str("home_section_new_crew"), str("home_section_new_crew_sub"), newCrew, SectionType.ARTISTS_ROW))
+                }
+            } catch (e: Exception) { e.printStackTrace() }
+            return sections
+        }
+
+        private suspend fun loadGuestData() {
+            try {
+                userProfile = null
+                val localLikes = LikeRepository.likedTracks.value
+                generatePersonalizedCategories()
+                val allSections = mutableListOf<HomeSection>()
+    
+                coroutineScope {
+                    val genericSectionsDef = async { fetchGenericGuestSections() }
+                    val personalSectionsDef = async {
+                        if (localLikes.isNotEmpty()) fetchPersonalizedSections(localLikes, str("guest_user")) else emptyList()
+                    }
+                    val historySectionDef = async { fetchHistoryBasedSection() }
+                    val discoverySectionDef = async { fetchDiscoverySection(localLikes) }
+                    val recommendationsDef = async { fetchTrackRecommendations(localLikes) }
+                    val artistUpdatesDef = async { fetchLikedArtistUpdates(localLikes) }
+
+                    val genericSections = genericSectionsDef.await()
+                    val personalSections = personalSectionsDef.await()
+                    val historySection = historySectionDef.await()
+                    val discoverySection = discoverySectionDef.await()
+                    val recommendationsSection = recommendationsDef.await()
+                    val artistUpdates = artistUpdatesDef.await()
+
+                    likedArtistUpdates.clear()
+                    likedArtistUpdates.addAll(artistUpdates)
+
+                    if (discoverySection != null) allSections.add(discoverySection)
+                    if (recommendationsSection != null) allSections.add(recommendationsSection)
+                    if (historySection != null) allSections.add(historySection)
+                    // Straight after your own history: what the artists you already play have put
+                    // out belongs next to what you just listened to, not down with the generic rows.
+                    if (artistUpdates.isNotEmpty()) {
+                        allSections.add(
+                            HomeSection(
+                                title = str("home_from_your_artists"),
+                                subtitle = str("home_from_your_artists_sub"),
+                                content = artistUpdates,
+                                type = SectionType.TRACKS_ROW,
+                            )
+                        )
+                    }
+                    allSections.addAll(personalSections)
+                    allSections.addAll(genericSections)
+                }
+    
+                if (allSections.isNotEmpty()) {
+                    homeSections.clear(); homeSections.addAll(allSections); saveToCache()
+                } else {
+                    delay(2000)
+                    if (homeSections.isEmpty()) loadGuestData()
+                }
+            } catch (e: Exception) { e.printStackTrace() }
+        }
+    
+        private suspend fun fetchGenericGuestSections(): List<HomeSection> {
+            val sections = mutableStateListOf<HomeSection>()
+            try {
+                coroutineScope {
+                    val trendingDef = async { try { api.getCharts(kind = "trending", genre = "soundcloud:genres:all-music").collection.mapNotNull { it.track } } catch(e:Exception){ emptyList() } }
+                    val albumsDef = async { try { api.searchAlbums(str("home_top_albums_query") + " 2026", limit = 10).collection } catch(e:Exception){ emptyList() } }
+                    val hiphopDef = async { try { api.searchTracks("Hip-Hop & Rap", limit = 20).collection } catch(e:Exception){ emptyList() } }
+                    val popDef = async { try { api.searchTracks("Pop Music Trending", limit = 20).collection } catch(e:Exception){ emptyList() } }
+                    val electroDef = async { try { api.searchPlaylists("Electro House 2026", limit = 10).collection } catch(e:Exception){ emptyList() } }
+                    val artistsDef = async { try { val l1 = api.searchUsers("Billboard", limit = 5).collection; val l2 = api.searchUsers("Official Music", limit = 5).collection; (l1+l2).distinctBy{it.id}.shuffled() } catch(e:Exception){ emptyList() } }
+    
+                    val trending = trendingDef.await()
+                    if (trending.isNotEmpty()) sections.add(HomeSection(str("home_trending"), null, trending, SectionType.TRACKS_ROW))
+    
+                    val albums = albumsDef.await()
+                    if (albums.isNotEmpty()) sections.add(HomeSection(str("home_albums_for_you"), null, albums, SectionType.STATIONS_ROW))
+    
+                    val hiphop = hiphopDef.await()
+                    if (hiphop.isNotEmpty()) sections.add(HomeSection(str("home_hiphop"), null, hiphop, SectionType.TRACKS_ROW))
+    
+                    val techno = electroDef.await()
+                    if (techno.isNotEmpty()) sections.add(HomeSection(str("home_electro"), null, techno, SectionType.STATIONS_ROW))
+    
+                    val artists = artistsDef.await()
+                    if (artists.isNotEmpty()) sections.add(HomeSection(str("lib_artists"), null, artists, SectionType.ARTISTS_ROW))
+    
+                    val pop = popDef.await()
+                    if (pop.isNotEmpty()) sections.add(HomeSection(str("home_pop"), null, pop, SectionType.TRACKS_ROW))
+                }
+            } catch (e: Exception) { e.printStackTrace() }
+            return sections
+        }
+    
+        private suspend fun loadAuthenticatedData() {
+            try {
+                val me = api.getMe()
+                userProfile = me
+                val allSections = mutableListOf<HomeSection>()
+    
+                coroutineScope {
+                    val streamDef = async {
+                        try {
+                            api.getMyStream(limit = 20).collection
+                                .filter { it.type == "track" || it.type == "track-repost" }
+                                .mapNotNull { it.track }
+                                .distinctBy { it.id }
+                        } catch (e: Exception) { emptyList() }
+                    }
+    
+                    val localLikes = LikeRepository.likedTracks.value
+                    val sourceLikes = if (localLikes.size > 20) localLikes else {
+                        try { api.getUserTrackLikes(me.id, limit = 50).collection.mapNotNull { it.track } } catch(e:Exception) { emptyList() }
+                    }
+    
+                    generatePersonalizedCategories()
+    
+                    val historySectionDef = async { fetchHistoryBasedSection() }
+                    val discoverySectionDef = async { fetchDiscoverySection(sourceLikes) }
+                    val recommendationsDef = async { fetchTrackRecommendations(localLikes) }
+                    val artistUpdatesDef = async { fetchLikedArtistUpdates(sourceLikes) }
+
+                    val discoverySection = discoverySectionDef.await()
+                    if (discoverySection != null) allSections.add(discoverySection)
+
+                    val streamTracks = streamDef.await()
+                    if (streamTracks.isNotEmpty()) {
+                        allSections.add(HomeSection(str("home_stream"), null, streamTracks, SectionType.HIGHLIGHT_ROW))
+                    }
+
+                    val recommendationsSection = recommendationsDef.await()
+                    if (recommendationsSection != null) allSections.add(recommendationsSection)
+
+                    val historySection = historySectionDef.await()
+                    if (historySection != null) allSections.add(historySection)
+
+                    val artistUpdates = artistUpdatesDef.await()
+                    likedArtistUpdates.clear()
+                    likedArtistUpdates.addAll(artistUpdates)
+                    if (artistUpdates.isNotEmpty()) {
+                        allSections.add(
+                            HomeSection(
+                                title = str("home_from_your_artists"),
+                                subtitle = str("home_from_your_artists_sub"),
+                                content = artistUpdates,
+                                type = SectionType.TRACKS_ROW,
+                            )
+                        )
+                    }
+
+                    if (sourceLikes.isNotEmpty()) {
+                        val personalSections = fetchPersonalizedSections(sourceLikes, me.username ?: str("unknown_user"))
+                        allSections.addAll(personalSections)
+                    }
+
+                    // Fetch mixed selections (Trending by genre, Latest from artists you follow, etc)
+                    val mixedSelections = fetchMixedSelections()
+                    if (mixedSelections.isNotEmpty()) {
+                        // Add mixed selections to the top or after discovery
+                        allSections.addAll(1, mixedSelections)
+                    }
+                }
+    
+                if (allSections.isNotEmpty()) {
+                    homeSections.clear()
+                    homeSections.addAll(allSections)
+                    saveToCache()
+                }
+
+                syncServerHistory()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
+        private fun syncServerHistory() {
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    val response = api.getPlayHistory(limit = 50)
+                    if (response.isSuccessful && response.body() != null) {
+                        val entries = response.body()!!.collection
+                        val trackIds = entries.mapNotNull { entry ->
+                            entry.urn.substringAfterLast(":").toLongOrNull()
+                        }.distinct()
+
+                        if (trackIds.isNotEmpty()) {
+                            val chunkedIds = trackIds.chunked(50)
+                            val fetchedTracksMap = mutableMapOf<Long, Track>()
+                            for (chunk in chunkedIds) {
+                                try {
+                                    val tracks = api.getTracksByIds(chunk.joinToString(","))
+                                    tracks.forEach { fetchedTracksMap[it.id] = it }
+                                } catch (e: Exception) {
+                                    Logger.e("HomeViewModel", "Failed to fetch history tracks chunk", e)
+                                }
+                            }
+
+                            val dbItemsToCache = mutableListOf<HistoryItem>()
+                            for (entry in entries) {
+                                val id = entry.urn.substringAfterLast(":").toLongOrNull() ?: continue
+                                val track = fetchedTracksMap[id] ?: continue
+
+                                val effectiveArtwork = track.artworkUrl?.takeIf { it.isNotBlank() }
+                                    ?: track.fullResArtwork.takeIf { it.isNotBlank() && !it.contains("picsum.photos") }
+                                    ?: track.user?.avatarUrl?.takeIf { it.isNotBlank() }
+                                    ?: ""
+
+                                dbItemsToCache.add(
+                                    HistoryItem(
+                                        id = "track:${track.id}",
+                                        numericId = track.id,
+                                        title = track.title ?: str("history_untitled_track"),
+                                        subtitle = track.displayArtist.ifBlank { track.user?.username.orEmpty() }.ifBlank { str("history_unknown_artist") },
+                                        imageUrl = effectiveArtwork,
+                                        type = "TRACK",
+                                        isVerified = track.user?.verified == true,
+                                        source = (track.source as? String) ?: "soundcloud",
+                                        originalUrl = track.permalinkUrl,
+                                        timestamp = entry.playedAt
+                                    )
+                                )
+                            }
+
+                            if (dbItemsToCache.isNotEmpty()) {
+                                HistoryRepository.insertHistoryList(dbItemsToCache)
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Logger.e("HomeViewModel", "Background history sync error: ${e.message}")
+                }
+            }
+        }
+    
+        private suspend fun fetchTrackRecommendations(localLikes: List<Track>): HomeSection? {
+            return try {
+                val historyItems = HistoryRepository.getHistory().first()
+    
+                val seedTracks = mutableListOf<Track>()
+                seedTracks.addAll(localLikes)
+                seedTracks.addAll(historyItems
+                    .filter { it.type == "TRACK" }
+                    .map {
+                        Track(id = it.numericId, title = it.title, user = null, artworkUrl = null, durationMs = 0L)
+                    }
+                )
+    
+                if (seedTracks.isEmpty()) return null
+    
+                val seedsToUse = seedTracks.shuffled().take(5)
+    
+                val recommendedTracks = coroutineScope {
+                    val tasks = seedsToUse.map { seed ->
+                        async {
+                            try {
+                                api.getRelatedTracks(seed.id, limit = 20).collection
+                            } catch (e: Exception) {
+                                emptyList<Track>()
+                            }
+                        }
+                    }
+                    tasks.awaitAll().flatten()
+                }
+    
+                val likedIds = localLikes.map { it.id }.toSet()
+                val historyIds = historyItems.map { it.numericId }.toSet()
+    
+                val finalTracks = recommendedTracks
+                    .distinctBy { it.id }
+                    .filter { !likedIds.contains(it.id) && !historyIds.contains(it.id) }
+                    .shuffled()
+                    .take(20)
+    
+                if (finalTracks.isNotEmpty()) {
+                    HomeSection(
+                        title = str("home_recommended_tracks"),
+                        subtitle = str("home_recommended_tracks_sub"),
+                        content = finalTracks,
+                        type = SectionType.TRACKS_ROW
+                    )
+                } else {
+                    null
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                null
+            }
+        }
+    
+        private suspend fun fetchMixedSelections(): List<HomeSection> {
+            val sections = mutableListOf<HomeSection>()
+            try {
+                val response = api.getMixedSelections()
+                for (selection in response.collection) {
+                    if (selection.items?.collection.isNullOrEmpty()) continue
+                    if (selection.urn?.contains("recently-played", ignoreCase = true) == true || 
+                        selection.id?.contains("recently-played", ignoreCase = true) == true ||
+                        selection.title?.equals("Recently Played", ignoreCase = true) == true) {
+                        continue
+                    }
+                    val parsedItems = mutableListOf<Any>()
+                    
+                    for (itemJson in selection.items.collection ?: emptyList()) {
+                        try {
+                            val jsonObj = itemJson.asJsonObject
+                            val actualObj = if (jsonObj.has("item")) jsonObj.getAsJsonObject("item") else jsonObj
+                            
+                            val kind = actualObj.get("kind")?.asString
+                            when (kind) {
+                                "track" -> parsedItems.add(gson.fromJson(actualObj, Track::class.java))
+                                "playlist", "system-playlist" -> parsedItems.add(gson.fromJson(actualObj, Playlist::class.java))
+                                "user" -> parsedItems.add(gson.fromJson(actualObj, User::class.java))
+                            }
+                        } catch (e: Exception) { e.printStackTrace() }
+                    }
+                    
+                    if (parsedItems.isNotEmpty()) {
+                        val tracks = parsedItems.filterIsInstance<Track>()
+                        val playlists = parsedItems.filterIsInstance<Playlist>()
+                        val users = parsedItems.filterIsInstance<User>()
+                        
+                        // Our own name for the selection where we have one: their titles come back
+                        // English whatever Accept-Language says (issue #33).
+                        val selectionUrn = selection.urn ?: selection.id
+                        val label = com.alananasss.kittytune.data.SoundCloudSelectionLabels
+                            .title(selectionUrn, selection.title) ?: "Selection"
+                        val labelSub = com.alananasss.kittytune.data.SoundCloudSelectionLabels
+                            .subtitle(selectionUrn, selection.description)
+
+                        val isLatest = selection.title?.contains("follow", ignoreCase = true) == true || 
+                                       selection.id?.contains("follow", ignoreCase = true) == true ||
+                                       selection.urn?.contains("follow", ignoreCase = true) == true
+
+                        if (tracks.isNotEmpty() && playlists.isEmpty() && users.isEmpty()) {
+                            sections.add(HomeSection(label, labelSub, tracks, if (isLatest) SectionType.HIGHLIGHT_ROW else SectionType.TRACKS_ROW))
+                        } else if (playlists.isNotEmpty() && tracks.isEmpty() && users.isEmpty()) {
+                            sections.add(HomeSection(label, labelSub, playlists, SectionType.STATIONS_ROW))
+                        } else if (users.isNotEmpty() && tracks.isEmpty() && playlists.isEmpty()) {
+                            sections.add(HomeSection(label, labelSub, users, SectionType.ARTISTS_ROW))
+                        } else {
+                            if (tracks.isNotEmpty()) {
+                                sections.add(HomeSection(label, labelSub, tracks, if (isLatest) SectionType.HIGHLIGHT_ROW else SectionType.TRACKS_ROW))
+                            } else if (playlists.isNotEmpty()) {
+                                sections.add(HomeSection(label, labelSub, playlists, SectionType.STATIONS_ROW))
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+            return sections
+        }
+
+        private fun getIconForGenre(genre: String): ImageVector {
+            val lowerCaseGenre = genre.lowercase(Locale.ROOT)
+            return when {
+                "phonk" in lowerCaseGenre -> Icons.Rounded.TimeToLeave
+                "rock" in lowerCaseGenre -> Icons.Rounded.Whatshot
+                "hip hop" in lowerCaseGenre || "rap" in lowerCaseGenre -> Icons.Rounded.Mic
+                "house" in lowerCaseGenre || "techno" in lowerCaseGenre || "edm" in lowerCaseGenre -> Icons.Rounded.Nightlife
+                "ambient" in lowerCaseGenre || "lo-fi" in lowerCaseGenre || "lofi" in lowerCaseGenre -> Icons.Rounded.Spa
+                else -> Icons.Rounded.MusicNote
+            }
+        }
+    
+        private fun parseSoundCloudTags(tagList: String?): List<String> {
+            if (tagList.isNullOrBlank()) return emptyList()
+            val tags = mutableListOf<String>()
+            val pattern = Pattern.compile("\"([^\"]*)\"|(\\S+)")
+            val matcher = pattern.matcher(tagList)
+            while (matcher.find()) {
+                if (matcher.group(1) != null) {
+                    tags.add(matcher.group(1)!!)
+                } else {
+                    tags.add(matcher.group(2)!!)
+                }
+            }
+            return tags
+        }
+    
+        private fun generatePersonalizedCategories() {
+            viewModelScope.launch(Dispatchers.Default) {
+                val likedTracks = LikeRepository.likedTracks.value.take(20)
+                val historyItems = historyFlow.first().filter { it.type == "TRACK" }.take(20)
+    
+                val sourceTracks = if (likedTracks.size >= 5) {
+                    likedTracks
+                } else {
+                    val historyTracks = historyItems.map {
+                        Track(it.numericId, it.title, null, 0L, User(0, it.subtitle, null), genre = null, tagList = null)
+                    }
+                    (likedTracks + historyTracks).distinctBy { it.id }.take(20)
+                }
+    
+                if (sourceTracks.isEmpty()) {
+                    withContext(Dispatchers.Main) { personalizedCategories.clear() }
+                    return@launch
+                }
+    
+                val allTags = mutableListOf<String>()
+                val excludedTags = setOf("music", "audio", "soundcloud", "song", "trap", "remix")
+    
+                sourceTracks.forEach { track ->
+                    track.genre?.let { genre ->
+                        if (genre.isNotBlank() && genre.length > 2 && !excludedTags.contains(genre.lowercase(Locale.ROOT))) {
+                            allTags.add(genre.trim())
+                        }
+                    }
+                    track.tagList?.let { tags ->
+                        parseSoundCloudTags(tags).forEach { tag ->
+                            if (tag.isNotBlank() && tag.length > 2 && !excludedTags.contains(tag.lowercase(Locale.ROOT))) {
+                                allTags.add(tag.trim())
+                            }
+                        }
+                    }
+                }
+    
+                val topTags = allTags
+                    .groupingBy { it.lowercase(Locale.ROOT) }
+                    .eachCount()
+                    .toList()
+                    .sortedByDescending { it.second }
+                    .take(10)
+                    .map { it.first }
+    
+                val newCategories = topTags.map { tag ->
+                    SearchCategory(
+                        id = tag,
+                        title = tag.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.getDefault()) else it.toString() },
+                        query = tag,
+                        icon = getIconForGenre(tag)
+                    )
+                }
+                withContext(Dispatchers.Main) {
+                    personalizedCategories.clear()
+                    personalizedCategories.addAll(newCategories)
+                }
+            }
+        }
+    }
+
+
+
+

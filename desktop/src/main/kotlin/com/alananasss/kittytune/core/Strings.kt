@@ -1,0 +1,122 @@
+package com.alananasss.kittytune.core
+
+import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
+import javax.xml.parsers.DocumentBuilderFactory
+import org.w3c.dom.Element
+
+/**
+ * Desktop replacement for Android string resources.
+ * Loads the exact same strings.xml files as the Android app (copied to resources/i18n/)
+ * and resolves them with Android-style positional formatting (%1$s, %d, ...).
+ *
+ * Locales supported (same as the Android in-app picker): system / en / fr / hu.
+ */
+object Strings {
+
+    /** "system", "en", "fr" or "hu" — mirrors the Android `app_language` pref. */
+    private var _appLanguage = androidx.compose.runtime.mutableStateOf("system")
+    var appLanguage: String
+        get() = _appLanguage.value
+        set(value) {
+            _appLanguage.value = value
+            cache.clear()
+        }
+
+    private val tables = ConcurrentHashMap<String, Map<String, String>>()
+    private val cache = ConcurrentHashMap<String, String>()
+
+    /**
+     * The locale to format dates and numbers with.
+     *
+     * The app's own language setting, not [Locale.getDefault]. Formatting followed the JVM default,
+     * so a French app on an English system printed "25 Aug 2026" under a "Date d'ajout" header
+     * (issue #33).
+     */
+    fun locale(): Locale = Locale.forLanguageTag(effectiveLang())
+
+    /** The concrete language in use after resolving "system": "en", "fr", "de", "hu", "ru" or "vi". */
+    val resolvedLanguage: String
+        get() = effectiveLang()
+
+    fun getAcceptLanguage(): String {
+        return when (effectiveLang()) {
+            "fr" -> "fr-FR,fr;q=0.9,en;q=0.8"
+            "de" -> "de-DE,de;q=0.9,en;q=0.8"
+            "hu" -> "hu-HU,hu;q=0.9,en;q=0.8"
+            "ru" -> "ru-RU,ru;q=0.9,en;q=0.8"
+            "vi" -> "vi-VN,vi;q=0.9,en;q=0.8"
+            "en" -> "en-US,en;q=0.9"
+            else -> {
+                val defaultLocale = Locale.getDefault()
+                val lang = defaultLocale.language.ifBlank { "en" }
+                val country = defaultLocale.country
+                if (country.isNotBlank()) {
+                    "$lang-$country,$lang;q=0.9,en;q=0.8"
+                } else {
+                    "$lang;q=0.9,en;q=0.8"
+                }
+            }
+        }
+    }
+
+    private fun effectiveLang(): String = when (appLanguage) {
+        "fr", "en", "de", "hu", "ru", "vi" -> appLanguage
+        else -> when (Locale.getDefault().language) {
+            "fr" -> "fr"
+            "de" -> "de"
+            "hu" -> "hu"
+            "ru" -> "ru"
+            "vi" -> "vi"
+            else -> "en"
+        }
+    }
+
+    private fun table(lang: String): Map<String, String> = tables.getOrPut(lang) {
+        val stream = Strings::class.java.getResourceAsStream("/i18n/strings-$lang.xml")
+            ?: return@getOrPut emptyMap()
+        val doc = DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(stream)
+        val nodes = doc.getElementsByTagName("string")
+        buildMap {
+            for (i in 0 until nodes.length) {
+                val el = nodes.item(i) as Element
+                val name = el.getAttribute("name")
+                put(name, unescape(el.textContent))
+            }
+        }
+    }
+
+    private fun unescape(raw: String): String = raw
+        .removeSurrounding("\"")
+        .replace("\\'", "'")
+        .replace("\\\"", "\"")
+        .replace("\\n", "\n")
+        .replace("\\@", "@")
+        .replace("\\?", "?")
+
+    /** Equivalent of stringResource(R.string.key). Falls back to English, then to the key itself. */
+    fun get(key: String): String {
+        val lang = effectiveLang()
+        return cache.getOrPut("$lang:$key") {
+            table(lang)[key] ?: table("en")[key] ?: key
+        }
+    }
+
+    /** Equivalent of stringResource(R.string.key, args...) with Android positional format support. */
+    fun get(key: String, vararg args: Any?): String {
+        val pattern = get(key)
+        if (pattern == key && args.size == 1 && args[0] is String && !key.contains("%")) {
+            return args[0] as String
+        }
+        return try {
+            // Android uses java.util.Formatter syntax — same on JVM.
+            String.format(pattern, *args)
+        } catch (_: Exception) {
+            pattern
+        }
+    }
+}
+
+/** Terse helper mirroring `stringResource(...)` call-sites: `str("app_name")`. */
+fun str(key: String): String = Strings.get(key)
+fun str(key: String, vararg args: Any?): String = Strings.get(key, *args)

@@ -1,0 +1,420 @@
+name: Build & Release All Universal Installers (Windows, macOS, Linux)
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    name: Build Windows Installer (.msi, Portable .zip)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Grant execute permission for gradlew
+        run: git update-index --chmod=+x gradlew
+        shell: bash
+
+      # The SMTC bridge ships as a prebuilt exe; this keeps it built from the source in the tree.
+      # Without it, the "Unknown Application" fix (issue #66) would live in the .cs and never in the
+      # binary users get.
+      - name: Build SMTC bridge from source
+        run: powershell -ExecutionPolicy Bypass -File scripts/build-smtc-bridge.ps1
+        shell: powershell
+
+      - name: Build Windows MSI & Portable App
+        run: .\gradlew.bat packageReleaseMsi createReleaseDistributable
+
+      - name: Get version from tag
+        id: get_version
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          echo "VERSION=$version" >> $env:GITHUB_OUTPUT
+        shell: powershell
+
+      - name: Prepare Windows Distribution Binaries
+        run: |
+          mkdir dist-win
+          Get-ChildItem -Path build\compose\binaries\main-release\msi\*.msi | ForEach-Object { Copy-Item $_.FullName -Destination "dist-win\KittyTune-${{ steps.get_version.outputs.VERSION }}-x64.msi" }
+          Compress-Archive -Path build\compose\binaries\main-release\app\* -DestinationPath dist-win\KittyTune-${{ steps.get_version.outputs.VERSION }}-Windows-Portable-x64.zip
+        shell: powershell
+
+      - name: Upload Windows Artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: KittyTune-Windows
+          path: dist-win/*
+
+  build-macos:
+    name: Build macOS Installer (.dmg)
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'gradle'
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build macOS DMG Package
+        run: ./gradlew packageReleaseDmg
+
+      - name: Get version from tag
+        id: get_version
+        run: echo "VERSION=$(echo ${{ github.ref_name }} | sed 's/^v//')" >> $GITHUB_OUTPUT
+
+      - name: Prepare macOS Binaries
+        run: |
+          mkdir dist-mac
+          cp build/compose/binaries/main-release/dmg/*.dmg dist-mac/KittyTune-${{ steps.get_version.outputs.VERSION }}.dmg
+
+      - name: Upload macOS Artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: KittyTune-macOS
+          path: dist-mac/*
+
+  build-linux-x64:
+    name: Build Linux x64 Packages (.deb, .rpm, .pkg.tar.zst, .AppImage)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install packaging tools (rpm, fakeroot, zstd)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm fakeroot zstd binutils
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'gradle'
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Debug Icon
+        run: ls -la src/main/resources/icons/ || true
+
+      - name: Build Debian, RPM & AppImage Packages
+        run: ./gradlew packageReleaseDeb packageReleaseRpm packageReleaseAppImage || ./gradlew packageReleaseDeb packageReleaseRpm
+
+      - name: Get version from tag
+        id: get_version
+        run: echo "VERSION=$(echo ${{ github.ref_name }} | sed 's/^v//')" >> $GITHUB_OUTPUT
+
+      - name: Create Arch Linux x64 Package (.pkg.tar.zst)
+        run: |
+          VERSION=${{ steps.get_version.outputs.VERSION }}
+          mkdir -p arch_build/pkg
+          DEB_FILE=$(find build -name "*.deb" | head -n 1)
+          ar x "$DEB_FILE"
+          tar -xf data.tar.* -C arch_build/pkg
+          
+          mkdir -p arch_build/pkg/usr/share/applications
+          mkdir -p arch_build/pkg/usr/share/icons/hicolor/256x256/apps
+          
+          cat << 'DESKTOP' > arch_build/pkg/usr/share/applications/kitty-tune.desktop
+          [Desktop Entry]
+          Name=KittyTune
+          Exec=/opt/kitty-tune/bin/KittyTune
+          Icon=kittytune
+          Type=Application
+          Categories=AudioVideo;Audio;
+          DESKTOP
+          
+          cp arch_build/pkg/opt/kitty-tune/lib/KittyTune.png arch_build/pkg/usr/share/icons/hicolor/256x256/apps/kittytune.png
+          
+          cat << PKGEOF > arch_build/pkg/.PKGINFO
+          pkgname = kitty-tune
+          pkgver = ${VERSION}-1
+          pkgdesc = KittyTune Desktop Music Player
+          url = https://github.com/alan7383/KittyTuneDesktop
+          builddate = REPLACE_BUILDDATE
+          packager = GitHub Actions <actions@github.com>
+          size = REPLACE_SIZE
+          arch = x86_64
+          license = custom
+          depend = java-runtime>=17
+          depend = hicolor-icon-theme
+          depend = alsa-lib
+          depend = gtk3
+          PKGEOF
+          
+          PKG_SIZE=$(du -sk arch_build/pkg | cut -f1)
+          PKG_DATE=$(date +%s)
+          sed -i "s/REPLACE_SIZE/$PKG_SIZE/" arch_build/pkg/.PKGINFO
+          sed -i "s/REPLACE_BUILDDATE/$PKG_DATE/" arch_build/pkg/.PKGINFO
+          
+          cd arch_build/pkg
+          tar -cf - .PKGINFO * | zstd -z -q - -o ../../kitty-tune-${VERSION}-1-x86_64.pkg.tar.zst
+          cd ../..
+
+      - name: Prepare Linux x64 Distribution Binaries
+        run: |
+          mkdir -p dist-linux-x64
+          find build -name "*.deb" -exec cp {} dist-linux-x64/ \;
+          find build -name "*.rpm" -exec cp {} dist-linux-x64/ \;
+          find build -name "*.AppImage" -exec cp {} dist-linux-x64/ \;
+          cp kitty-tune-*-x86_64.pkg.tar.zst dist-linux-x64/ 2>/dev/null || true
+
+      - name: Upload Linux x64 Packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: KittyTune-Linux-x64
+          path: dist-linux-x64/*
+
+  build-linux-arm64:
+    name: Build Linux ARM64 Packages (.deb, .rpm, .pkg.tar.zst)
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install packaging tools (rpm, fakeroot, zstd)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm fakeroot zstd binutils
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'gradle'
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Debug Icon
+        run: ls -la src/main/resources/icons/ || true
+
+      - name: Build Debian & RPM Packages
+        run: ./gradlew packageReleaseDeb packageReleaseRpm
+
+      - name: Get version from tag
+        id: get_version
+        run: echo "VERSION=$(echo ${{ github.ref_name }} | sed 's/^v//')" >> $GITHUB_OUTPUT
+
+      - name: Create Arch Linux ARM64 Package (.pkg.tar.zst)
+        run: |
+          VERSION=${{ steps.get_version.outputs.VERSION }}
+          mkdir -p arch_build_arm/pkg
+          DEB_FILE=$(find build -name "*.deb" | head -n 1)
+          ar x "$DEB_FILE"
+          tar -xf data.tar.* -C arch_build_arm/pkg
+          
+          mkdir -p arch_build_arm/pkg/usr/share/applications
+          mkdir -p arch_build_arm/pkg/usr/share/icons/hicolor/256x256/apps
+          
+          cat << 'DESKTOP' > arch_build_arm/pkg/usr/share/applications/kitty-tune.desktop
+          [Desktop Entry]
+          Name=KittyTune
+          Exec=/opt/kitty-tune/bin/KittyTune
+          Icon=kittytune
+          Type=Application
+          Categories=AudioVideo;Audio;
+          DESKTOP
+          
+          cp arch_build_arm/pkg/opt/kitty-tune/lib/KittyTune.png arch_build_arm/pkg/usr/share/icons/hicolor/256x256/apps/kittytune.png
+          
+          cat << PKGEOF > arch_build_arm/pkg/.PKGINFO
+          pkgname = kitty-tune
+          pkgver = ${VERSION}-1
+          pkgdesc = KittyTune Desktop Music Player
+          url = https://github.com/alan7383/KittyTuneDesktop
+          builddate = REPLACE_BUILDDATE
+          packager = GitHub Actions <actions@github.com>
+          size = REPLACE_SIZE
+          arch = aarch64
+          license = custom
+          depend = java-runtime>=17
+          depend = hicolor-icon-theme
+          depend = alsa-lib
+          depend = gtk3
+          PKGEOF
+          
+          PKG_SIZE=$(du -sk arch_build_arm/pkg | cut -f1)
+          PKG_DATE=$(date +%s)
+          sed -i "s/REPLACE_SIZE/$PKG_SIZE/" arch_build_arm/pkg/.PKGINFO
+          sed -i "s/REPLACE_BUILDDATE/$PKG_DATE/" arch_build_arm/pkg/.PKGINFO
+          
+          cd arch_build_arm/pkg
+          tar -cf - .PKGINFO * | zstd -z -q - -o ../../kitty-tune-${VERSION}-1-aarch64.pkg.tar.zst
+          cd ../..
+
+      - name: Prepare Linux ARM64 Distribution Binaries
+        run: |
+          mkdir -p dist-linux-arm64
+          find build -name "*.deb" -exec cp {} dist-linux-arm64/ \;
+          find build -name "*.rpm" -exec cp {} dist-linux-arm64/ \;
+          cp kitty-tune-*-aarch64.pkg.tar.zst dist-linux-arm64/ 2>/dev/null || true
+
+      - name: Upload Linux ARM64 Packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: KittyTune-Linux-arm64
+          path: dist-linux-arm64/*
+
+  release:
+    name: Publish Universal GitHub Release
+    needs: [build-windows, build-macos, build-linux-x64, build-linux-arm64]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Download Windows Artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: KittyTune-Windows
+          path: ./release-files
+
+      - name: Download macOS Artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: KittyTune-macOS
+          path: ./release-files
+
+      - name: Download Linux x64 Artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: KittyTune-Linux-x64
+          path: ./release-files
+
+      - name: Download Linux ARM64 Artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: KittyTune-Linux-arm64
+          path: ./release-files
+
+      - name: Get previous tag
+        id: prev_tag
+        run: |
+          PREV=$(git describe --tags --abbrev=0 "${{ github.ref_name }}^" 2>/dev/null || echo "")
+          if [ -z "$PREV" ]; then
+            echo "range=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "range=${PREV}..${{ github.ref_name }}" >> $GITHUB_OUTPUT
+            echo "prev=$PREV" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate changelog
+        uses: orhun/git-cliff-action@v4
+        id: cliff
+        with:
+          config: cliff.toml
+          args: --strip header -- ${{ steps.prev_tag.outputs.range }}
+
+      - name: Write changelog to file
+        run: |
+          echo "${{ steps.cliff.outputs.content }}" > CHANGELOG_RELEASE.md
+          echo "" >> CHANGELOG_RELEASE.md
+          if [ -n "${{ steps.prev_tag.outputs.prev }}" ]; then
+            echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${{ steps.prev_tag.outputs.prev }}...${{ github.ref_name }}" >> CHANGELOG_RELEASE.md
+          fi
+
+      - name: Publish Release to GitHub
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || 'v1.0.20' }}
+          name: ${{ github.ref_type == 'tag' && github.ref_name || 'KittyTune Desktop v1.0.20' }}
+          draft: false
+          prerelease: false
+          body_path: CHANGELOG_RELEASE.md
+          files: ./release-files/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Discord Release Notification ────────────────────────────────────────
+      - name: Send Discord Release Notification
+        if: success()
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_RELEASE_WEBHOOK }}
+          TAG_NAME: ${{ github.ref_type == 'tag' && github.ref_name || 'v1.0.20' }}
+        run: |
+          python3 - << 'EOF'
+          import os, json, urllib.request
+
+          webhook_url = os.environ.get("DISCORD_WEBHOOK")
+          if not webhook_url:
+              print("No DISCORD_RELEASE_WEBHOOK configured, skipping.")
+              exit(0)
+
+          tag = os.environ.get("TAG_NAME", "")
+          release_url = f"https://github.com/alan7383/KittyTuneDesktop/releases/tag/{tag}"
+
+          changelog = ""
+          if os.path.exists("CHANGELOG_RELEASE.md"):
+              with open("CHANGELOG_RELEASE.md", "r", encoding="utf-8") as f:
+                  changelog = f.read().strip()
+
+          if len(changelog) > 1500:
+              changelog = changelog[:1490] + "\n\n... *(full changelog on GitHub)*"
+
+          payload = {
+              "content": f"<@&1552727930801627166> **(=^･ω･^=) KittyTune Desktop {tag} is now available!**",
+              "allowed_mentions": {
+                  "roles": ["1552727930801627166"]
+              },
+              "embeds": [
+                  {
+                      "title": f"KittyTune Desktop {tag} (Windows, Linux, macOS)",
+                      "url": release_url,
+                      "description": changelog if changelog else f"KittyTune Desktop {tag} has been released!",
+                      "color": 30868,
+                      "fields": [
+                          {
+                              "name": "✦ Download Installers",
+                              "value": f"[GitHub Releases & Packages]({release_url})\n*Windows (.msi, .zip), Linux (.deb, .rpm, .AppImage, .pkg.tar.zst), macOS (.dmg)*",
+                              "inline": False
+                          }
+                      ],
+                      "footer": {
+                          "text": "KittyTune Desktop • Automated Release Pipeline"
+                      }
+                  }
+              ]
+          }
+
+          req = urllib.request.Request(
+              webhook_url,
+              data=json.dumps(payload).encode("utf-8"),
+              headers={
+                  "Content-Type": "application/json",
+                  "User-Agent": "GitHub-Actions-Release-Notifier"
+              }
+          )
+          try:
+              with urllib.request.urlopen(req) as resp:
+                  print("Discord notification sent! Status:", resp.status)
+          except Exception as e:
+              print("Failed to send Discord notification:", e)
+          EOF

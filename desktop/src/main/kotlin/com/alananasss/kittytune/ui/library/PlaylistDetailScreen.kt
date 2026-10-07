@@ -1,0 +1,2867 @@
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3ExpressiveApi::class)
+package com.alananasss.kittytune.ui.library
+
+import androidx.compose.material3.IconButtonDefaults
+
+import androidx.compose.material3.ButtonDefaults
+
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import androidx.compose.foundation.layout.*
+import com.alananasss.kittytune.ui.common.ScrollableLazyColumn as LazyColumn
+import androidx.compose.ui.platform.LocalFocusManager
+import com.alananasss.kittytune.core.BackHandler
+import com.alananasss.kittytune.ui.common.escapeDismisses
+import com.alananasss.kittytune.ui.common.ArtistLinkText
+import com.alananasss.kittytune.ui.common.rememberReleaseDate
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.onClick
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.PointerMatcher
+import androidx.compose.ui.input.pointer.PointerButton
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.PlaylistPlay
+import androidx.compose.material.icons.automirrored.rounded.QueueMusic
+import androidx.compose.material.icons.automirrored.rounded.FormatListBulleted
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.FavoriteBorder
+import androidx.compose.material.icons.outlined.Image
+import androidx.compose.material.icons.rounded.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import com.alananasss.kittytune.core.trackTextInput
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import sh.calvin.reorderable.ReorderableItem
+import sh.calvin.reorderable.rememberReorderableLazyListState
+import androidx.lifecycle.viewmodel.compose.viewModel
+import coil3.compose.AsyncImage
+import coil3.request.ImageRequest
+import coil3.size.Size
+import coil3.PlatformContext
+import com.alananasss.kittytune.core.AppInstance
+import com.alananasss.kittytune.core.BackHandler
+import com.alananasss.kittytune.core.EscapableAlertDialog
+import com.alananasss.kittytune.core.str
+import com.alananasss.kittytune.data.AlbumResolver
+import com.alananasss.kittytune.data.DownloadManager
+import com.alananasss.kittytune.data.LikeRepository
+import com.alananasss.kittytune.data.local.AppDatabase
+import com.alananasss.kittytune.data.network.RetrofitClient
+import com.alananasss.kittytune.domain.Playlist
+import com.alananasss.kittytune.domain.Track
+import com.alananasss.kittytune.domain.User
+import com.alananasss.kittytune.ui.common.viewableCover
+import com.alananasss.kittytune.ui.common.TrackListItemShimmer
+import com.alananasss.kittytune.ui.player.PlaybackContext
+import com.alananasss.kittytune.ui.player.PlayerViewModel
+import com.alananasss.kittytune.utils.NetworkUtils
+import kotlinx.coroutines.flow.first
+import java.awt.FileDialog
+import java.awt.Frame
+import java.awt.Toolkit
+import java.awt.datatransfer.StringSelection
+import java.io.File
+import java.net.URLDecoder
+
+enum class TrackSortBy {
+    FIRST_ADDED, RECENTLY_ADDED, TITLE_AZ, ARTIST_AZ
+}
+
+/** Width of the gap between likes-table columns; the header's drag handles live in it. */
+private val COLUMN_GAP = 16.dp
+
+/** Formats an API date ("2022-10-04T21:58:09Z" or "2022/10/04 21:58:09 +0000") as "dd MMM yyyy". */
+private fun formatApiDate(raw: String?): String {
+    if (raw.isNullOrBlank()) return ""
+    // Catalog dates sometimes stop at the year or the month; those match none of the
+    // patterns below and used to render as an empty cell.
+    Regex("^(\\d{4})(?:-(\\d{2}))?$").find(raw.trim())?.let { m ->
+        val year = m.groupValues[1]
+        val month = m.groupValues[2]
+        if (month.isBlank()) return year
+        val monthDate = runCatching {
+            java.text.SimpleDateFormat("yyyy-MM", java.util.Locale.US).parse("$year-$month")
+        }.getOrNull() ?: return year
+        return java.text.SimpleDateFormat("MMM yyyy", com.alananasss.kittytune.core.Strings.locale()).format(monthDate)
+    }
+    val millis = runCatching { java.time.Instant.parse(raw).toEpochMilli() }.getOrNull()
+        ?: runCatching {
+            java.text.SimpleDateFormat("yyyy/MM/dd HH:mm:ss Z", java.util.Locale.US).parse(raw)?.time
+        }.getOrNull()
+        ?: runCatching {
+            java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).parse(raw)?.time
+        }.getOrNull()
+        ?: return ""
+    return java.text.SimpleDateFormat("dd MMM yyyy", com.alananasss.kittytune.core.Strings.locale()).format(java.util.Date(millis))
+}
+
+/**
+ * User-resizable column weights for the playlist track table (Spotify-style drag
+ * handles in the header). Shared by TrackTableHeaderRow and TrackTableItem so header
+ * and rows stay aligned; persisted so the layout survives restarts.
+ */
+/** Spotify-style display mode for playlist/likes/album track lists. */
+enum class TrackViewMode { COMPACT, LIST }
+
+/** Single shared instance: TrackTableColumns and TrackViewModePref write the same file. */
+private val uiPrefs = com.alananasss.kittytune.core.NamedPrefs("ui_prefs")
+
+/** Persisted display mode, shared by every playlist/likes/album page. */
+private object TrackViewModePref {
+    var mode by mutableStateOf(
+        runCatching { TrackViewMode.valueOf(uiPrefs.getString("track_view_mode", "") ?: "") }
+            .getOrDefault(TrackViewMode.LIST)
+    )
+        private set
+
+    fun set(value: TrackViewMode) {
+        mode = value
+        uiPrefs.putString("track_view_mode", value.name)
+    }
+}
+
+private object TrackTableColumns {
+    private val prefs get() = uiPrefs
+    private const val MIN_WEIGHT = 1f
+
+    var title by mutableStateOf(prefs.getInt("likes_col_title", 500) / 100f)
+        private set
+    var album by mutableStateOf(prefs.getInt("likes_col_album", 300) / 100f)
+        private set
+    var date by mutableStateOf(prefs.getInt("likes_col_date", 200) / 100f)
+        private set
+
+    fun total(albumVisible: Boolean, dateVisible: Boolean) =
+        title + (if (albumVisible) album else 0f) + (if (dateVisible) date else 0f)
+
+    /**
+     * With all columns visible: divider 0 = title|album, divider 1 = album|date.
+     * With one middle/right column hidden, the single divider 0 resizes the two
+     * remaining columns (title|date on album pages, title|album on remote playlists).
+     */
+    fun drag(divider: Int, deltaWeight: Float, albumVisible: Boolean, dateVisible: Boolean) {
+        when {
+            !albumVisible && !dateVisible -> return
+            !albumVisible -> {
+                val pair = title + date
+                val newTitle = (title + deltaWeight).coerceIn(MIN_WEIGHT, pair - MIN_WEIGHT)
+                title = newTitle
+                date = pair - newTitle
+            }
+            divider == 0 -> {
+                val pair = title + album
+                val newTitle = (title + deltaWeight).coerceIn(MIN_WEIGHT, pair - MIN_WEIGHT)
+                title = newTitle
+                album = pair - newTitle
+            }
+            dateVisible -> {
+                val pair = album + date
+                val newAlbum = (album + deltaWeight).coerceIn(MIN_WEIGHT, pair - MIN_WEIGHT)
+                album = newAlbum
+                date = pair - newAlbum
+            }
+        }
+    }
+
+    fun save() {
+        prefs.putInt("likes_col_title", (title * 100).toInt())
+        prefs.putInt("likes_col_album", (album * 100).toInt())
+        prefs.putInt("likes_col_date", (date * 100).toInt())
+    }
+}
+
+/**
+ * User-resizable column weights for the compact view (no artwork, artist in its
+ * own column, denser rows). Same drag-handle mechanism as [TrackTableColumns],
+ * persisted separately so each mode keeps its own layout.
+ */
+private object TrackCompactColumns {
+    private val prefs get() = uiPrefs
+    private const val MIN_WEIGHT = 1f
+
+    var title by mutableStateOf(prefs.getInt("compact_col_title", 350) / 100f)
+        private set
+    var artist by mutableStateOf(prefs.getInt("compact_col_artist", 220) / 100f)
+        private set
+    var album by mutableStateOf(prefs.getInt("compact_col_album", 280) / 100f)
+        private set
+    var date by mutableStateOf(prefs.getInt("compact_col_date", 200) / 100f)
+        private set
+
+    fun total(albumVisible: Boolean, dateVisible: Boolean) =
+        title + artist + (if (albumVisible) album else 0f) + (if (dateVisible) date else 0f)
+
+    /**
+     * Divider 0 = title|artist, divider 1 = artist|album (or artist|date when the
+     * album column is hidden), divider 2 = album|date.
+     */
+    fun drag(divider: Int, deltaWeight: Float, albumVisible: Boolean, dateVisible: Boolean) {
+        when (divider) {
+            0 -> {
+                val pair = title + artist
+                val newTitle = (title + deltaWeight).coerceIn(MIN_WEIGHT, pair - MIN_WEIGHT)
+                title = newTitle
+                artist = pair - newTitle
+            }
+            1 -> when {
+                albumVisible -> {
+                    val pair = artist + album
+                    val newArtist = (artist + deltaWeight).coerceIn(MIN_WEIGHT, pair - MIN_WEIGHT)
+                    artist = newArtist
+                    album = pair - newArtist
+                }
+                dateVisible -> {
+                    val pair = artist + date
+                    val newArtist = (artist + deltaWeight).coerceIn(MIN_WEIGHT, pair - MIN_WEIGHT)
+                    artist = newArtist
+                    date = pair - newArtist
+                }
+            }
+            2 -> if (albumVisible && dateVisible) {
+                val pair = album + date
+                val newAlbum = (album + deltaWeight).coerceIn(MIN_WEIGHT, pair - MIN_WEIGHT)
+                album = newAlbum
+                date = pair - newAlbum
+            }
+        }
+    }
+
+    fun save() {
+        prefs.putInt("compact_col_title", (title * 100).toInt())
+        prefs.putInt("compact_col_artist", (artist * 100).toInt())
+        prefs.putInt("compact_col_album", (album * 100).toInt())
+        prefs.putInt("compact_col_date", (date * 100).toInt())
+    }
+}
+
+/**
+ * Desktop port of the Android PlaylistDetailScreen.
+ * Renders inside the center panel; the Android bottom sheets become dropdown
+ * menus, drag-reorder/swipe-delete become menu actions, the photo picker is an
+ * AWT FileDialog and "share" copies the URL to the clipboard.
+ *
+ * Handles the same playlistId protocol: "likes", "downloads", "local_files",
+ * numeric ids, "station:", "station_artist:", "liked_by:", "local_playlist:",
+ * "system_playlist:", "downloaded_section:", "yt_radio:<encoded url>".
+ */
+
+@Composable
+fun PlaylistDetailScreen(
+    playlistId: String,
+    onBackClick: () -> Unit,
+    onNavigate: (String) -> Unit,
+    playerViewModel: PlayerViewModel,
+    youtubeRadioViewModel: YoutubeRadioViewModel = viewModel(key = "yt_radio_$playlistId") {
+        YoutubeRadioViewModel(AppInstance.application)
+    }
+) {
+    val api = remember { RetrofitClient.create() }
+    val storageTrigger by DownloadManager.storageTrigger.collectAsState()
+    val debouncedStorageTrigger by DownloadManager.debouncedStorageTrigger.collectAsState(0)
+    val scope = rememberCoroutineScope()
+    val isYoutubeRadio = playlistId.startsWith("yt_radio:")
+
+    val tracks = remember { mutableStateListOf<Track>() }
+    val downloadedPlaylists = remember { mutableStateListOf<Playlist>() }
+
+    val likedTracksRepo by LikeRepository.likedTracks.collectAsState()
+    val likedPlaylistsRepo by LikeRepository.likedPlaylists.collectAsState()
+    var isAlbum by remember { mutableStateOf(false) }
+
+    var playlistTitle by remember { mutableStateOf("") }
+    var playlistSharing by remember { mutableStateOf<String?>(null) }
+    var playlistCover by remember { mutableStateOf<String?>(null) }
+    var playlistDescription by remember { mutableStateOf<String?>(null) }
+    var playlistUrn by remember { mutableStateOf<String?>(null) }
+    var playlistPermalinkUrl by remember { mutableStateOf<String?>(null) }
+
+    var playlistGenre by remember { mutableStateOf<String?>(null) }
+    var playlistTagList by remember { mutableStateOf<String?>(null) }
+    var playlistSetType by remember { mutableStateOf<String?>(null) }
+    var playlistReleaseDate by remember { mutableStateOf<String?>(null) }
+    // Catalog extras: "2025 • Album" style subtitle shown under the title.
+    var playlistMetaSubtitle by remember { mutableStateOf<String?>(null) }
+    var playlistPermalink by remember { mutableStateOf<String?>(null) }
+
+    var playlistUser by remember { mutableStateOf<User?>(null) }
+    // Every artist credited on the header (a Spotify album can list several); the
+    // header line offers the picker instead of silently opening the first one.
+    var playlistArtists by remember { mutableStateOf<List<com.alananasss.kittytune.data.spotify.SpotifyArtistRef>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(true) }
+    var defaultIcon by remember { mutableStateOf<ImageVector?>(null) }
+
+    val downloadProgress by DownloadManager.downloadProgress.collectAsState()
+    val playlistDownloadProgress by DownloadManager.playlistDownloadProgress.collectAsState()
+    val downloadedIds by DownloadManager.downloadedIds.collectAsState()
+
+    val isDownloadedView = playlistId.startsWith("downloaded_section:")
+    val isDeezerArtist = playlistId.startsWith("deezer:artist:")
+    val isTidalArtist = playlistId.startsWith("tidal:artist:")
+    val isQobuzArtist = playlistId.startsWith("qobuz:artist:")
+    val isArtistStation = playlistId.startsWith("station_artist:")
+    val isArtistView = isDeezerArtist || isTidalArtist || isQobuzArtist || isArtistStation
+
+    val cleanIdStr = playlistId.replace("station_artist:", "")
+        .replace("station_spotify:", "")
+        .replace("spotify:album:", "")
+        .replace("spotify_album:", "")
+        .replace("spotify:playlist:", "")
+        .replace("spotify_playlist:", "")
+        .replace("deezer:album:", "")
+        .replace("deezer:playlist:", "")
+        .replace("deezer:artist:", "")
+        .replace("tidal:album:", "")
+        .replace("tidal:playlist:", "")
+        .replace("tidal:artist:", "")
+        .replace("qobuz:album:", "")
+        .replace("qobuz:playlist:", "")
+        .replace("qobuz:artist:", "")
+        .replace("station:", "")
+        .replace("liked_by:", "")
+        .replace("local_playlist:", "")
+        .replace("yt_radio:", "")
+        .replace("downloaded_section:", "")
+        .replace("system_playlist:", "")
+
+    val stationIdFromUrn = cleanIdStr.substringAfterLast(":").toLongOrNull()
+    val currentIdLong = stationIdFromUrn ?: cleanIdStr.toLongOrNull() ?: 0L
+
+    val stableId = remember(playlistId, cleanIdStr, currentIdLong) {
+        if (currentIdLong != 0L) currentIdLong else cleanIdStr.hashCode().toLong()
+    }
+
+    val playlistInDb by DownloadManager.isPlaylistInLibraryFlow(stableId).collectAsState(initial = null)
+
+    val effectiveBatchId = if (playlistId == "likes") DownloadManager.LIKES_BATCH_ID else stableId
+    val isPlaylistDownloading = DownloadManager.isPlaylistDownloading(effectiveBatchId)
+    val currentPlaylistProgress = playlistDownloadProgress[effectiveBatchId]
+
+    var isUserCreated by remember { mutableStateOf(false) }
+    var isLocalPlaylist by remember { mutableStateOf(false) }
+
+    LaunchedEffect(stableId, playlistId) {
+        DownloadManager.trackRemovedFromPlaylist.collect { (targetPlaylistId, removedTrackId) ->
+            if (targetPlaylistId == stableId || (playlistId == "downloads" && targetPlaylistId == -2L)) {
+                tracks.removeAll { it.id == removedTrackId }
+            }
+        }
+    }
+
+    LaunchedEffect(playlistCover, playlistId) {
+        if (!playlistCover.isNullOrEmpty() && playlistId != "downloads" && playlistId != "likes" && currentIdLong != 0L) {
+            val db = AppDatabase.downloadDao
+            db.updateHistoryItemImageUrl(playlistId, playlistCover!!)
+        }
+    }
+
+    var showDeleteDialog by remember { mutableStateOf(false) }
+    var showRemoveDownloadDialog by remember { mutableStateOf(false) }
+    var showRenameDialog by remember { mutableStateOf(false) }
+    var showEditDialog by remember { mutableStateOf(false) }
+    var showOptionsMenu by remember { mutableStateOf(false) }
+    var showSortMenu by remember { mutableStateOf(false) }
+    var showViewModeMenu by remember { mutableStateOf(false) }
+    var showDetailsSheet by remember { mutableStateOf(false) }
+
+    var playlistSearchQuery by remember { mutableStateOf("") }
+    val focusManager = LocalFocusManager.current
+    BackHandler(enabled = playlistSearchQuery.isNotEmpty()) {
+        playlistSearchQuery = ""
+        focusManager.clearFocus()
+    }
+    var playlistSortBy by remember { mutableStateOf(TrackSortBy.FIRST_ADDED) }
+
+    val listState = rememberLazyListState()
+
+    val isSpecialPlaylist = playlistId == "likes" || playlistId == "downloads" || playlistId == "local_files" || playlistId.startsWith("liked_by:") || playlistId.startsWith("station") || playlistId.startsWith("system_playlist:")
+
+    // Drag-to-reorder — only active for user-owned playlists with no active search/sort
+    val canReorder = !isSpecialPlaylist && isUserCreated && playlistSearchQuery.isEmpty() && playlistSortBy == TrackSortBy.FIRST_ADDED
+    val reorderableState = rememberReorderableLazyListState(lazyListState = listState) { from, to ->
+        if (canReorder) {
+            val fromKey = from.key as? String
+            val toKey = to.key as? String
+            if (fromKey != null && toKey != null && fromKey != toKey) {
+                val fromIndex = tracks.indices.firstOrNull { i -> getPlaylistTrackStableKey(i, tracks[i].id, tracks) == fromKey } ?: -1
+                val toIndex = tracks.indices.firstOrNull { i -> getPlaylistTrackStableKey(i, tracks[i].id, tracks) == toKey } ?: -1
+                if (fromIndex != -1 && toIndex != -1 && fromIndex != toIndex) {
+                    tracks.add(toIndex, tracks.removeAt(fromIndex))
+                }
+            }
+        }
+    }
+    // Sync to local DB + SoundCloud when the drag ends. The wasDragging latch keeps
+    // the effect from firing on first composition with the untouched order. Local
+    // persistence also covers negative (local-only) playlist ids; the online sync
+    // guards on id > 0 internally.
+    val isDragging = reorderableState.isAnyItemDragging
+    var wasDragging by remember { mutableStateOf(false) }
+    LaunchedEffect(isDragging) {
+        if (wasDragging && !isDragging && canReorder && currentIdLong != 0L) {
+            val newOrder = tracks.map { it.id }
+            DownloadManager.reorderPlaylistTracks(currentIdLong, newOrder)
+            DownloadManager.syncPlaylistOrderOnline(currentIdLong, newOrder)
+        }
+        wasDragging = isDragging
+    }
+
+    val rawTracks: List<Track> = if (playlistId == "likes") likedTracksRepo else tracks
+
+    // Warm the album cache from SQLite so already-resolved rows render instantly.
+    LaunchedEffect(rawTracks.size) {
+        if (rawTracks.isNotEmpty()) AlbumResolver.prefetchFromDb(rawTracks)
+    }
+
+    val tracksToDisplay = if (playlistSearchQuery.isEmpty() && playlistSortBy == TrackSortBy.FIRST_ADDED) {
+        rawTracks
+    } else {
+        val filtered = rawTracks.filter {
+            it.title?.contains(playlistSearchQuery, ignoreCase = true) == true ||
+                it.user?.username?.contains(playlistSearchQuery, ignoreCase = true) == true
+        }
+        when (playlistSortBy) {
+            TrackSortBy.FIRST_ADDED -> filtered
+            TrackSortBy.RECENTLY_ADDED -> filtered.reversed()
+            TrackSortBy.TITLE_AZ -> filtered.sortedBy { it.title?.lowercase() ?: "" }
+            TrackSortBy.ARTIST_AZ -> filtered.sortedBy { it.user?.username?.lowercase() ?: "" }
+        }
+    }
+
+    // Date column uses added-at where available (likes, local playlists, downloads) and
+    // falls back to release/upload date for remote playlists — but only when the rows can
+    // actually produce one. Spotify list payloads ship no dates, so those rows resolve
+    // theirs individually as they scroll into view (see rememberReleaseDate); lists that
+    // can never have a date, like YouTube mixes, drop the column instead of showing blanks.
+    // Computed directly (no remember): tracksToDisplay can be a SnapshotStateList
+    // whose identity never changes, and `any` short-circuits on the first element.
+    val showDateColumn = tracksToDisplay.any {
+        it.likedAt != null || !it.releaseDate.isNullOrBlank() || !it.createdAt.isNullOrBlank() ||
+            it.source == "spotify"
+    }
+    val useReleaseDate = !isSpecialPlaylist && tracksToDisplay.any { it.likedAt == null }
+
+    val downloadedCount = remember(tracks.size, tracksToDisplay.size, downloadedIds) {
+        if (tracksToDisplay.isEmpty()) 0
+        else tracksToDisplay.count { track -> downloadedIds.contains(track.id) }
+    }
+
+    val isFullyDownloaded = remember(
+        tracksToDisplay.size,
+        downloadedCount,
+        isPlaylistDownloading,
+        isDownloadedView,
+        playlistInDb,
+        playlistId
+    ) {
+        if (tracksToDisplay.isEmpty()) false
+        else if (isDownloadedView) true
+        else if (playlistId == "likes") downloadedCount == tracksToDisplay.size && !isPlaylistDownloading
+        else (playlistInDb != null && playlistInDb?.isDownloaded == true && downloadedCount == tracksToDisplay.size && !isPlaylistDownloading)
+    }
+    val refreshTrigger =
+        if (playlistId == "downloads" || playlistId == "local_files" || currentIdLong < 0L || isDownloadedView) debouncedStorageTrigger else 0
+
+    val shareUrl = remember(playlistId, currentIdLong, playlistPermalinkUrl, playlistUser) {
+        when {
+            playlistId.startsWith("station_artist:") -> "https://soundcloud.com/discover/sets/artist-stations:$currentIdLong"
+            playlistId.startsWith("station:") -> "https://soundcloud.com/discover/sets/track-stations:$currentIdLong"
+            playlistId.startsWith("yt_radio:") -> {
+                val decodedUrl = URLDecoder.decode(cleanIdStr, "UTF-8")
+                val videoId = decodedUrl.substringAfter("v=").substringBefore("&")
+                "https://www.youtube.com/watch?v=$videoId&list=RD$videoId"
+            }
+            playlistId.startsWith("liked_by:") -> {
+                val profileUrl = playlistPermalinkUrl ?: playlistUser?.permalinkUrl
+                if (profileUrl != null) "$profileUrl/likes"
+                else "https://soundcloud.com/discover/sets/liked-by::$currentIdLong"
+            }
+            playlistId == "likes" -> {
+                val user = playlistUser
+                if (user != null && user.id > 0 && !user.permalinkUrl.isNullOrEmpty()) "${user.permalinkUrl}/likes" else ""
+            }
+            playlistId == "downloads" -> ""
+            currentIdLong > 0 -> playlistPermalinkUrl ?: "https://soundcloud.com/playlists/$currentIdLong"
+            else -> ""
+        }
+    }
+
+    LaunchedEffect(playlistInDb, currentIdLong, playlistUser, playerViewModel.currentUserId, playlistId) {
+        if (isSpecialPlaylist) {
+            isLocalPlaylist = false
+            isUserCreated = false
+            return@LaunchedEffect
+        }
+        val playerPrefs = com.alananasss.kittytune.data.local.PlayerPreferences()
+        val currentUserId = playerViewModel.currentUserId.takeIf { it != 0L }
+            ?: playerPrefs.getCachedUserId().takeIf { it != 0L }
+        val currentUsername = playerViewModel.currentUser?.username
+            ?: playerPrefs.getCachedUsername()
+
+        val isOwnedByCurrentAccount = (playlistUser?.id != null && playlistUser?.id != 0L && playlistUser?.id == currentUserId) ||
+            (!currentUsername.isNullOrBlank() && (playlistInDb?.artist?.equals(currentUsername, ignoreCase = true) == true || playlistUser?.username?.equals(currentUsername, ignoreCase = true) == true))
+
+        val isLocalUser = currentIdLong < 0 || (playlistInDb?.isUserCreated == true) || isOwnedByCurrentAccount
+        isLocalPlaylist = isDownloadedView || currentIdLong < 0
+        isUserCreated = isLocalUser
+
+        if (playlistInDb != null) {
+            if (isLocalUser && !playlistInDb!!.isUserCreated) {
+                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                    try {
+                        val dao = com.alananasss.kittytune.data.local.AppDatabase.downloadDao
+                        dao.updatePlaylist(playlistInDb!!.copy(isUserCreated = true))
+                    } catch (_: Exception) {}
+                }
+            }
+            val dbTitle = playlistInDb!!.title
+            if (!dbTitle.isNullOrBlank() && dbTitle != str("untitled_track") && dbTitle != str("track_untitled")) {
+                playlistTitle = dbTitle
+            }
+            val localCoverFile = java.io.File(com.alananasss.kittytune.core.AppDirs.imageCacheDir, "playlist_cover_${currentIdLong}.jpg")
+            val dbCover = playlistInDb!!.localCoverPath ?: if (localCoverFile.exists()) localCoverFile.absolutePath else playlistInDb!!.artworkUrl
+            if (!dbCover.isNullOrBlank()) {
+                playlistCover = dbCover
+            }
+        } else if (currentIdLong > 0) {
+            val localCoverFile = java.io.File(com.alananasss.kittytune.core.AppDirs.imageCacheDir, "playlist_cover_${currentIdLong}.jpg")
+            if (localCoverFile.exists() && playlistCover != localCoverFile.absolutePath) {
+                playlistCover = localCoverFile.absolutePath
+            }
+        }
+    }
+
+    LaunchedEffect(playlistId, refreshTrigger) {
+        if (playlistId.startsWith("yt_radio:")) {
+            val encodedUrl = playlistId.removePrefix("yt_radio:")
+            val url = URLDecoder.decode(encodedUrl, "UTF-8")
+            youtubeRadioViewModel.loadInitial(url)
+            return@LaunchedEffect
+        }
+
+        if (tracks.isEmpty() && downloadedPlaylists.isEmpty()) {
+            isLoading = true
+        }
+
+        val newTracks = mutableListOf<Track>()
+        val newDownloadedPlaylists = mutableListOf<Playlist>()
+        playlistArtists = emptyList()
+
+        try {
+            if (playerViewModel.currentUserId == 0L) {
+                playerViewModel.fetchUserProfile()
+            }
+
+            val db = AppDatabase.downloadDao
+
+            when {
+                playlistId.startsWith("spotify") || playlistId.startsWith("station_spotify:") -> {
+                    val isSpotifyAlbum = playlistId.startsWith("spotify:album:") || playlistId.startsWith("spotify_album:")
+                    val isSpotifyPlaylist = playlistId.startsWith("spotify:playlist:") || playlistId.startsWith("spotify_playlist:")
+                    val isSpotifyRadio = playlistId.startsWith("spotify_radio:") || playlistId.startsWith("station_spotify:")
+
+                    if (isSpotifyAlbum) {
+                        val album = com.alananasss.kittytune.data.spotify.SpotifyRepository.getAlbum(cleanIdStr)
+                        if (album != null) {
+                            isAlbum = true
+                            playlistTitle = album.name
+                            playlistCover = album.artworkUrl
+                            val uniqueArtists = album.artists.distinctBy { it.id.ifBlank { it.name } }
+                            val firstArtist = uniqueArtists.firstOrNull()
+                            playlistArtists = uniqueArtists
+                            playlistUser = User(
+                                id = kotlin.math.abs(firstArtist?.id?.hashCode()?.toLong() ?: 0L),
+                                username = album.artistName,
+                                avatarUrl = firstArtist?.avatarUrl ?: album.artworkUrl,
+                                urn = firstArtist?.id?.let { "spotify:artist:$it" },
+                                permalink = firstArtist?.id,
+                                verified = firstArtist?.verified ?: false
+                            )
+                            playlistReleaseDate = album.releaseDate
+                            playlistMetaSubtitle = album.formattedSubtitle
+                            playlistPermalinkUrl = "https://open.spotify.com/album/${album.id}"
+                            playlistUrn = "spotify:album:${album.id}"
+                            newTracks.addAll(album.tracks.map { it.toTrack() })
+                        }
+                    } else if (isSpotifyPlaylist) {
+                        val pl = com.alananasss.kittytune.data.spotify.SpotifyRepository.getPlaylist(cleanIdStr)
+                        if (pl != null) {
+                            isAlbum = false
+                            playlistTitle = pl.name
+                            playlistCover = pl.artworkUrl
+                            playlistDescription = pl.description
+                            playlistMetaSubtitle = pl.followersCount?.takeIf { it > 0 }?.let {
+                                java.text.NumberFormat.getNumberInstance(java.util.Locale.getDefault()).format(it) + " " + str("profile_followers")
+                            }
+                            playlistUser = User(
+                                id = 0L,
+                                username = pl.ownerName ?: "Spotify",
+                                avatarUrl = pl.artworkUrl
+                            )
+                            playlistPermalinkUrl = "https://open.spotify.com/playlist/${pl.id}"
+                            playlistUrn = "spotify:playlist:${pl.id}"
+                            newTracks.addAll(pl.tracks.map { it.toTrack() })
+                        }
+                    } else if (isSpotifyRadio) {
+                        val isArtistStationSeed = playlistId.startsWith("station_artist:") || playlistId.startsWith("spotify:artist:") || playlistId.startsWith("spotify_artist:")
+                        var radioPlaylist = com.alananasss.kittytune.data.spotify.SpotifyRepository.getRadio(cleanIdStr, isArtist = isArtistStationSeed)
+                        if (radioPlaylist == null) {
+                            radioPlaylist = com.alananasss.kittytune.data.spotify.SpotifyRepository.getRadio(cleanIdStr, isArtist = !isArtistStationSeed)
+                        }
+                        if (radioPlaylist != null) {
+                            isAlbum = false
+                            playlistTitle = radioPlaylist.name
+                            playlistCover = radioPlaylist.artworkUrl
+                            defaultIcon = Icons.Rounded.Radio
+                            playlistUser = User(
+                                id = kotlin.math.abs("Spotify".hashCode().toLong()),
+                                username = radioPlaylist.ownerName ?: "Spotify",
+                                avatarUrl = radioPlaylist.artworkUrl
+                            )
+                            playlistPermalinkUrl = "https://open.spotify.com/playlist/${radioPlaylist.id}"
+                            playlistUrn = "spotify:playlist:${radioPlaylist.id}"
+                            newTracks.addAll(radioPlaylist.tracks.map { it.toTrack() })
+                        } else {
+                            val seedTrack = com.alananasss.kittytune.data.spotify.SpotifyRepository.getTrack(cleanIdStr)
+                            val radioTitle = if (seedTrack != null) str("spotify_radio_title", seedTrack.name) else "Spotify Radio"
+                            playlistTitle = radioTitle
+                            playlistCover = seedTrack?.artworkUrl
+                            defaultIcon = Icons.Rounded.Radio
+                            isAlbum = false
+                            if (seedTrack != null) {
+                                playlistArtists = seedTrack.artists
+                                playlistUser = User(
+                                    id = kotlin.math.abs(seedTrack.artists.firstOrNull()?.id?.hashCode()?.toLong() ?: 0L),
+                                    username = seedTrack.artistName,
+                                    avatarUrl = seedTrack.artists.firstOrNull()?.avatarUrl ?: seedTrack.artworkUrl,
+                                    urn = seedTrack.artists.firstOrNull()?.id?.let { "spotify:artist:$it" }
+                                )
+                                playlistPermalinkUrl = seedTrack.shareUrl
+                                val radioList = com.alananasss.kittytune.data.spotify.SpotifyRepository.getRadioTracks(cleanIdStr)
+                                newTracks.addAll(radioList.map { it.toTrack() })
+                            } else {
+                                val artist = com.alananasss.kittytune.data.spotify.SpotifyRepository.getArtist(cleanIdStr)
+                                if (artist != null) {
+                                    playlistTitle = "${artist.name} Radio"
+                                    playlistCover = artist.avatarUrl ?: artist.headerImageUrl
+                                    playlistArtists = listOf(
+                                        com.alananasss.kittytune.data.spotify.SpotifyArtistRef(
+                                            id = artist.id,
+                                            name = artist.name,
+                                            avatarUrl = artist.avatarUrl
+                                        )
+                                    )
+                                    playlistUser = User(
+                                        id = kotlin.math.abs(artist.id.hashCode().toLong()),
+                                        username = artist.name,
+                                        avatarUrl = artist.avatarUrl,
+                                        urn = "spotify:artist:${artist.id}"
+                                    )
+                                    newTracks.addAll(artist.topTracks.map { it.toTrack() })
+                                }
+                            }
+                        }
+                    }
+                }
+
+                playlistId.startsWith("deezer:") -> {
+                    val isDeezerAlbum = playlistId.startsWith("deezer:album:")
+                    val isDeezerPlaylist = playlistId.startsWith("deezer:playlist:")
+                    val isDeezerArtist = playlistId.startsWith("deezer:artist:")
+
+                    if (isDeezerAlbum) {
+                        val pl = com.alananasss.kittytune.data.deezer.DeezerSearchRepository.getAlbum(cleanIdStr)
+                        if (pl != null) {
+                            isAlbum = true
+                            playlistTitle = pl.title.orEmpty()
+                            playlistCover = pl.artworkUrl
+                            playlistUser = pl.user
+                            playlistReleaseDate = pl.releaseDate
+                            playlistPermalinkUrl = pl.permalinkUrl
+                            playlistUrn = pl.urn
+                            newTracks.addAll(pl.tracks ?: emptyList())
+                        }
+                    } else if (isDeezerPlaylist) {
+                        val pl = com.alananasss.kittytune.data.deezer.DeezerSearchRepository.getPlaylist(cleanIdStr)
+                        if (pl != null) {
+                            isAlbum = false
+                            playlistTitle = pl.title.orEmpty()
+                            playlistCover = pl.artworkUrl
+                            playlistDescription = pl.description
+                            playlistUser = pl.user
+                            playlistPermalinkUrl = pl.permalinkUrl
+                            playlistUrn = pl.urn
+                            newTracks.addAll(pl.tracks ?: emptyList())
+                        }
+                    } else if (isDeezerArtist) {
+                        val pl = com.alananasss.kittytune.data.deezer.DeezerSearchRepository.getArtist(cleanIdStr)
+                        if (pl != null) {
+                            isAlbum = false
+                            playlistTitle = pl.title.orEmpty()
+                            playlistCover = pl.artworkUrl
+                            playlistUser = pl.user
+                            playlistPermalinkUrl = pl.permalinkUrl
+                            playlistUrn = pl.urn
+                            newTracks.addAll(pl.tracks ?: emptyList())
+                        }
+                    }
+                }
+
+                playlistId.startsWith("tidal:") -> {
+                    val isTidalAlbum = playlistId.startsWith("tidal:album:")
+                    val isTidalPlaylist = playlistId.startsWith("tidal:playlist:")
+                    val isTidalArtist = playlistId.startsWith("tidal:artist:")
+
+                    if (isTidalAlbum) {
+                        val pl = com.alananasss.kittytune.data.tidal.TidalSearchRepository.getAlbum(cleanIdStr)
+                        if (pl != null) {
+                            isAlbum = true
+                            playlistTitle = pl.title.orEmpty()
+                            playlistCover = pl.artworkUrl
+                            playlistUser = pl.user
+                            playlistReleaseDate = pl.releaseDate
+                            playlistPermalinkUrl = pl.permalinkUrl
+                            playlistUrn = pl.urn
+                            newTracks.addAll(pl.tracks ?: emptyList())
+                        }
+                    } else if (isTidalPlaylist) {
+                        val pl = com.alananasss.kittytune.data.tidal.TidalSearchRepository.getPlaylist(cleanIdStr)
+                        if (pl != null) {
+                            isAlbum = false
+                            playlistTitle = pl.title.orEmpty()
+                            playlistCover = pl.artworkUrl
+                            playlistDescription = pl.description
+                            playlistUser = pl.user
+                            playlistPermalinkUrl = pl.permalinkUrl
+                            playlistUrn = pl.urn
+                            newTracks.addAll(pl.tracks ?: emptyList())
+                        }
+                    } else if (isTidalArtist) {
+                        val pl = com.alananasss.kittytune.data.tidal.TidalSearchRepository.getArtist(cleanIdStr)
+                        if (pl != null) {
+                            isAlbum = false
+                            playlistTitle = pl.title.orEmpty()
+                            playlistCover = pl.artworkUrl
+                            playlistUser = pl.user
+                            playlistPermalinkUrl = pl.permalinkUrl
+                            playlistUrn = pl.urn
+                            newTracks.addAll(pl.tracks ?: emptyList())
+                        }
+                    }
+                }
+
+                playlistId.startsWith("qobuz:") -> {
+                    val isQobuzAlbum = playlistId.startsWith("qobuz:album:")
+                    val isQobuzPlaylist = playlistId.startsWith("qobuz:playlist:")
+                    val isQobuzArtist = playlistId.startsWith("qobuz:artist:")
+
+                    if (isQobuzAlbum) {
+                        val pl = com.alananasss.kittytune.data.qobuz.QobuzSearchRepository.getAlbum(cleanIdStr)
+                        if (pl != null) {
+                            isAlbum = true
+                            playlistTitle = pl.title.orEmpty()
+                            playlistCover = pl.artworkUrl
+                            playlistUser = pl.user
+                            playlistReleaseDate = pl.releaseDate
+                            playlistPermalinkUrl = pl.permalinkUrl
+                            playlistUrn = pl.urn
+                            newTracks.addAll(pl.tracks ?: emptyList())
+                        }
+                    } else if (isQobuzPlaylist) {
+                        val pl = com.alananasss.kittytune.data.qobuz.QobuzSearchRepository.getPlaylist(cleanIdStr)
+                        if (pl != null) {
+                            isAlbum = false
+                            playlistTitle = pl.title.orEmpty()
+                            playlistCover = pl.artworkUrl
+                            playlistDescription = pl.description
+                            playlistUser = pl.user
+                            playlistPermalinkUrl = pl.permalinkUrl
+                            playlistUrn = pl.urn
+                            newTracks.addAll(pl.tracks ?: emptyList())
+                        }
+                    } else if (isQobuzArtist) {
+                        val pl = com.alananasss.kittytune.data.qobuz.QobuzSearchRepository.getArtist(cleanIdStr)
+                        if (pl != null) {
+                            isAlbum = false
+                            playlistTitle = pl.title.orEmpty()
+                            playlistCover = pl.artworkUrl
+                            playlistUser = pl.user
+                            playlistPermalinkUrl = pl.permalinkUrl
+                            playlistUrn = pl.urn
+                            newTracks.addAll(pl.tracks ?: emptyList())
+                        }
+                    }
+                }
+
+                playlistId == "likes" -> {
+                    playlistTitle = str("lib_liked_tracks")
+                    defaultIcon = Icons.Rounded.Favorite
+                    playlistUser = try {
+                        api.getMe()
+                    } catch (e: Exception) {
+                        User(0, str("me_artist"), null)
+                    }
+                }
+
+                playlistId == "downloads" -> {
+                    playlistTitle = str("lib_downloads")
+                    defaultIcon = Icons.Rounded.Folder
+                    isLocalPlaylist = false
+                    val localPlaylists = db.getDownloadedPlaylists().first()
+                    newDownloadedPlaylists.addAll(localPlaylists.mapNotNull { local ->
+                        val tracksInPlaylist = db.getTracksForPlaylistSync(local.id)
+                        val realDownloadedCount = tracksInPlaylist.count { it.localAudioPath.isNotEmpty() }
+                        if (realDownloadedCount == 0) return@mapNotNull null
+                        val firstTrackArt = tracksInPlaylist.firstOrNull { it.localArtworkPath.isNotEmpty() || it.artworkUrl.isNotEmpty() }?.let {
+                            if (it.localArtworkPath.isNotEmpty()) it.localArtworkPath else it.artworkUrl
+                        }
+                        val finalArt = local.localCoverPath ?: local.artworkUrl.ifEmpty { firstTrackArt ?: "" }
+                        Playlist(
+                            id = local.id,
+                            title = local.title,
+                            artworkUrl = finalArt,
+                            calculatedArtworkUrl = local.localCoverPath,
+                            trackCount = realDownloadedCount,
+                            user = User(0, local.artist, null),
+                            tracks = null
+                        )
+                    })
+                    val allDownloadedTracks = db.getAllTracksList().filter { it.localAudioPath.isNotEmpty() }
+                    newTracks.addAll(allDownloadedTracks.map { local ->
+                        Track(
+                            id = local.id,
+                            title = local.title,
+                            artworkUrl = local.localArtworkPath.ifEmpty { local.artworkUrl },
+                            durationMs = local.duration,
+                            user = User(0, local.artist, null),
+                            isLiked = true,
+                            likedAt = local.downloadedAt.takeIf { it > 0 }
+                        )
+                    })
+                }
+
+                playlistId == "local_files" -> {
+                    playlistTitle = str("lib_local_media")
+                    defaultIcon = Icons.Default.SdStorage
+                    isLocalPlaylist = false
+                    val allTracks = db.getAllTracksList()
+                    val localFileTracks = allTracks.filter { it.id < 0 }
+                    newTracks.addAll(localFileTracks.map { local ->
+                        Track(
+                            id = local.id,
+                            title = local.title,
+                            artworkUrl = local.localArtworkPath.ifEmpty { local.artworkUrl },
+                            durationMs = local.duration,
+                            user = User(0, local.artist, null),
+                            description = str("description_local_file", local.localAudioPath),
+                            likedAt = local.downloadedAt.takeIf { it > 0 }
+                        )
+                    })
+                }
+
+                playlistId.startsWith("liked_by:") -> {
+                    val targetUserId = currentIdLong
+                    defaultIcon = Icons.Rounded.Favorite
+                    val user = api.getUser(targetUserId)
+                    playlistTitle = "Liked by ${user.username}"
+                    playlistCover = user.avatarUrl?.replace("large", "t500x500")
+                    playlistUser = user
+                    playlistPermalinkUrl = user.permalinkUrl
+
+                    val allCollectedTracks = mutableListOf<Track>()
+                    val likesResponse = api.getUserTrackLikes(targetUserId, limit = 200)
+                    // mapNotNull: a like whose track was deleted, made private or blocked comes
+                    // back with no track, and one of those used to take the whole page down with it.
+                    allCollectedTracks.addAll(likesResponse.collection.mapNotNull { item ->
+                        val track = item.track ?: return@mapNotNull null
+                        val millis = item.createdAt?.let { raw ->
+                            runCatching { java.time.Instant.parse(raw).toEpochMilli() }.getOrNull()
+                                ?: runCatching { java.text.SimpleDateFormat("yyyy/MM/dd HH:mm:ss Z", java.util.Locale.US).parse(raw)?.time }.getOrNull()
+                        }
+                        track.copy(likedAt = millis ?: track.likedAt, createdAt = item.createdAt ?: track.createdAt)
+                    })
+
+                    var nextUrl = likesResponse.next_href
+                    var safetyPageCount = 0
+                    while (nextUrl != null && safetyPageCount < 50) {
+                        try {
+                            val nextResponse = api.getTrackLikesNextPage(nextUrl)
+                            allCollectedTracks.addAll(nextResponse.collection.mapNotNull { item ->
+                                val track = item.track ?: return@mapNotNull null
+                                val millis = item.createdAt?.let { raw ->
+                                    runCatching { java.time.Instant.parse(raw).toEpochMilli() }.getOrNull()
+                                        ?: runCatching { java.text.SimpleDateFormat("yyyy/MM/dd HH:mm:ss Z", java.util.Locale.US).parse(raw)?.time }.getOrNull()
+                                }
+                                track.copy(likedAt = millis ?: track.likedAt, createdAt = item.createdAt ?: track.createdAt)
+                            })
+                            nextUrl = nextResponse.next_href
+                            safetyPageCount++
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                            break
+                        }
+                    }
+                    newTracks.addAll(allCollectedTracks.distinctBy { it.id })
+                }
+
+                else -> {
+                    val isOffline = !NetworkUtils.isInternetAvailable()
+                    val forceLocal = isOffline || isDownloadedView || currentIdLong < 0
+                    val localPlaylist = if (stableId != 0L && forceLocal) db.getPlaylist(stableId) else null
+                    if (localPlaylist != null) {
+                        playlistTitle = localPlaylist.title
+                        playlistCover = localPlaylist.localCoverPath ?: localPlaylist.artworkUrl
+                        playlistUser = User(0, localPlaylist.artist, null)
+                        isUserCreated = localPlaylist.isUserCreated || currentIdLong < 0
+                        isLocalPlaylist = isDownloadedView || currentIdLong < 0
+                        playlistPermalinkUrl = localPlaylist.permalinkUrl
+
+                        val playlistTracks = db.getTracksForPlaylistSync(stableId)
+                        val filteredTracks = if (isDownloadedView) {
+                            playlistTracks.filter { it.localAudioPath.isNotEmpty() }
+                        } else playlistTracks
+
+                        val addedAtMap = db.getAddedAtForPlaylist(stableId)
+                        newTracks.addAll(filteredTracks.map { local ->
+                            Track(
+                                id = local.id,
+                                title = local.title,
+                                artworkUrl = local.localArtworkPath.ifEmpty { local.artworkUrl },
+                                durationMs = local.duration,
+                                user = User(0, local.artist, null),
+                                likedAt = addedAtMap[local.id]?.takeIf { it > 0 }
+                            )
+                        })
+                    } else {
+                        val isSystemPlaylistRoute = playlistId.startsWith("system_playlist:")
+                        if (currentIdLong > 0L || isSystemPlaylistRoute) {
+                            val localFallback = if (currentIdLong != 0L) db.getPlaylist(currentIdLong) else null
+                            if (localFallback != null) {
+                                playlistTitle = localFallback.title
+                                playlistCover = localFallback.localCoverPath ?: localFallback.artworkUrl
+                                playlistUser = User(0, localFallback.artist, null)
+                                isUserCreated = localFallback.isUserCreated
+                            }
+
+                            val permalinkForCheck = localFallback?.permalinkUrl ?: playlistId
+                            val isArtistStation = playlistId.startsWith("station_artist:") || permalinkForCheck.contains("artist-stations") || cleanIdStr.contains("artist-stations")
+                            val isTrackStation = playlistId.startsWith("station:") || permalinkForCheck.contains("track-stations") || cleanIdStr.contains("track-stations")
+
+                            val playlistObj = try {
+                                when {
+                                    isTrackStation -> api.getTrackStation(currentIdLong)
+                                    isArtistStation -> api.getArtistStation(currentIdLong)
+                                    isSystemPlaylistRoute -> api.getSystemPlaylist(cleanIdStr)
+                                    else -> api.getPlaylist(currentIdLong)
+                                }
+                            } catch (e: Exception) {
+                                if (e is retrofit2.HttpException && e.code() == 404 && currentIdLong > 0L) {
+                                    val fallbackPermalink = localFallback?.permalinkUrl ?: playlistPermalinkUrl ?: ""
+                                    when {
+                                        fallbackPermalink.contains("track-stations") -> api.getTrackStation(currentIdLong)
+                                        fallbackPermalink.contains("artist-stations") -> api.getArtistStation(currentIdLong)
+                                        else -> {
+                                            try {
+                                                api.getTrackStation(currentIdLong)
+                                            } catch (_: Exception) {
+                                                try {
+                                                    api.getArtistStation(currentIdLong)
+                                                } catch (_: Exception) {
+                                                    throw e
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    throw e
+                                }
+                            }
+                            isAlbum = playlistObj.isRealAlbum
+
+                            playlistTitle = playlistObj.title.takeIf { !it.isNullOrBlank() } ?: playlistTitle
+                            playlistUser = playlistObj.user ?: playlistUser
+                            isUserCreated = (playlistUser?.id != 0L && playlistUser?.id == playerViewModel.currentUserId) ||
+                                (playerViewModel.currentUser != null && playlistUser?.username == playerViewModel.currentUser?.username)
+
+                            val rawOnlineArt = if (isUserCreated) {
+                                val validCustom = playlistObj.artworkUrl?.takeIf { !it.contains("avatars") && !it.contains("default_avatar") }
+                                val validCalc = playlistObj.calculatedArtworkUrl?.takeIf { !it.contains("avatars") && !it.contains("default_avatar") }
+                                validCustom ?: validCalc ?: ""
+                            } else {
+                                playlistObj.fullResArtwork
+                            }
+                            if (rawOnlineArt.isNotBlank() && !rawOnlineArt.contains("picsum")) {
+                                playlistCover = rawOnlineArt
+                            }
+                            playlistSharing = playlistObj.sharing
+                            playlistDescription = playlistObj.description
+                            playlistUrn = playlistObj.urn
+                            playlistGenre = playlistObj.genre
+                            playlistTagList = playlistObj.tagList
+                            playlistSetType = playlistObj.setType
+                            playlistReleaseDate = playlistObj.releaseDate
+                            playlistPermalink = playlistObj.permalink
+                            playlistPermalinkUrl = playlistObj.permalinkUrl.takeIf { !it.isNullOrBlank() }
+                                ?: if (isArtistStation) "https://soundcloud.com/discover/sets/artist-stations:$currentIdLong"
+                                else if (isTrackStation) "https://soundcloud.com/discover/sets/track-stations:$currentIdLong"
+                                else null
+
+                            val rawPlaylistTracks = playlistObj.tracks ?: emptyList()
+                            val incompleteIds = rawPlaylistTracks.filter { it.title.isNullOrBlank() || it.user == null }.map { it.id }
+
+                            if (incompleteIds.isNotEmpty()) {
+                                val fetchedTracksMap = mutableMapOf<Long, Track>()
+                                incompleteIds.chunked(50).forEach { batchIds ->
+                                    try {
+                                        val fetched = api.getTracksByIds(batchIds.joinToString(","))
+                                        fetched.forEach { fetchedTracksMap[it.id] = it }
+                                    } catch (e: Exception) { e.printStackTrace() }
+                                }
+                                newTracks.addAll(rawPlaylistTracks.map { track ->
+                                    if (track.title.isNullOrBlank() || track.user == null) fetchedTracksMap[track.id] ?: track else track
+                                })
+                            } else {
+                                newTracks.addAll(rawPlaylistTracks)
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (playlistId != "likes") {
+                tracks.clear()
+                tracks.addAll(newTracks)
+                if ((playlistCover.isNullOrBlank() || (isUserCreated && playlistCover?.contains("avatars") == true)) && newTracks.isNotEmpty()) {
+                    val firstArt = newTracks.firstOrNull { it.fullResArtwork.isNotBlank() && !it.fullResArtwork.contains("picsum") && !it.fullResArtwork.contains("avatars") }?.fullResArtwork
+                    if (!firstArt.isNullOrBlank()) {
+                        playlistCover = firstArt
+                    }
+                }
+                if (stableId != 0L) {
+                    val localInDb = db.getPlaylist(stableId)
+                    if (localInDb != null && (localInDb.artworkUrl.isBlank() || localInDb.artworkUrl.contains("avatars")) && !playlistCover.isNullOrBlank()) {
+                        db.updatePlaylist(localInDb.copy(artworkUrl = playlistCover!!))
+                    }
+                }
+            }
+
+            if (playlistId == "downloads") {
+                downloadedPlaylists.clear()
+                downloadedPlaylists.addAll(newDownloadedPlaylists)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        } finally {
+            isLoading = false
+        }
+    }
+
+    if (playlistId.startsWith("yt_radio:")) {
+        playlistTitle = youtubeRadioViewModel.playlistTitle
+        playlistCover = youtubeRadioViewModel.playlistCover
+        playlistUser = youtubeRadioViewModel.playlistUser
+        tracks.clear()
+        tracks.addAll(youtubeRadioViewModel.tracks)
+        isLoading = youtubeRadioViewModel.isLoading
+    }
+
+    // ---------------------------------------------------------------- dialogs
+
+    if (showDeleteDialog) {
+        EscapableAlertDialog(
+            onDismissRequest = { showDeleteDialog = false },
+            title = { Text(str(if (isUserCreated) "dialog_delete_playlist_title" else "dialog_delete_playlist_from_lib_title")) },
+            text = { Text(str("dialog_delete_playlist_msg")) },
+            confirmButton = {
+                TextButton(onClick = {
+                    if (stableId != 0L) {
+                        DownloadManager.deletePlaylist(
+                            playlistId = stableId,
+                            forceUserCreated = isUserCreated,
+                            forcePermalink = playlistPermalinkUrl
+                        )
+                    }
+                    showDeleteDialog = false
+                    onBackClick()
+                }) { Text(str("btn_confirm"), color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { showDeleteDialog = false }) { Text(str("btn_cancel")) } }
+        )
+    }
+
+    if (showRemoveDownloadDialog) {
+        EscapableAlertDialog(
+            onDismissRequest = { showRemoveDownloadDialog = false },
+            title = { Text(str("dialog_remove_download_title")) },
+            text = { Text(str("dialog_remove_download_msg")) },
+            confirmButton = {
+                TextButton(onClick = {
+                    if (playlistId == "likes") {
+                        // Full list, not tracksToDisplay — an active search must not
+                        // limit the removal to the visible subset.
+                        DownloadManager.removeDownloads(rawTracks.toList())
+                    } else if (stableId != 0L) {
+                        DownloadManager.removePlaylistDownloads(stableId, rawTracks.toList())
+                    }
+                    showRemoveDownloadDialog = false
+                    if (isDownloadedView) onBackClick()
+                }) { Text(str("btn_delete"), color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { showRemoveDownloadDialog = false }) { Text(str("btn_cancel")) } }
+        )
+    }
+
+    if (showRenameDialog) {
+        var newTitle by remember { mutableStateOf(playlistTitle) }
+        EscapableAlertDialog(
+            onDismissRequest = { showRenameDialog = false },
+            title = { Text(str("profile_edit")) },
+            text = {
+                OutlinedTextField(
+                    value = newTitle,
+                    onValueChange = { newTitle = it },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().trackTextInput()
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    if (currentIdLong != 0L && newTitle.isNotBlank()) {
+                        DownloadManager.editPlaylistMetadata(currentIdLong, newTitle)
+                        playlistTitle = newTitle
+                    }
+                    showRenameDialog = false
+                }) { Text(str("btn_confirm")) }
+            },
+            dismissButton = { TextButton(onClick = { showRenameDialog = false }) { Text(str("btn_cancel")) } }
+        )
+    }
+
+    if (showDetailsSheet) {
+        BackHandler(onBack = { showDetailsSheet = false })
+        Dialog(onDismissRequest = { showDetailsSheet = false }) {
+            Surface(
+                shape = RoundedCornerShape(28.dp),
+                color = MaterialTheme.colorScheme.surfaceContainer,
+                modifier = Modifier.width(620.dp).heightIn(max = 680.dp)
+            ) {
+                PlaylistDetailsSheet(
+                    // system_playlist: / spotify ids are urns, not numeric — pass them verbatim
+                    playlistId = when {
+                        playlistId.startsWith("system_playlist:") || playlistId.startsWith("spotify:") || playlistId.startsWith("spotify_") -> playlistId
+                        currentIdLong > 0L -> currentIdLong.toString()
+                        else -> playlistId
+                    },
+                    onDismiss = { showDetailsSheet = false },
+                    onViewAll = { tabIndex ->
+                        showDetailsSheet = false
+                        onNavigate("playlist_fans/$currentIdLong?tab=$tabIndex")
+                    },
+                    onNavigate = { dest -> showDetailsSheet = false; onNavigate(dest) },
+                    onMentionClick = { username ->
+                        showDetailsSheet = false
+                        playerViewModel.resolveAndNavigateToArtist(username)
+                    }
+                )
+            }
+        }
+    }
+
+    if (showEditDialog) {
+        EditPlaylistScreen(
+            initialTitle = playlistTitle ?: "",
+            initialDescription = playlistDescription,
+            initialSharing = playlistSharing,
+            initialTagList = playlistTagList,
+            initialGenre = playlistGenre,
+            initialSetType = playlistSetType,
+            initialReleaseDate = playlistReleaseDate,
+            initialPermalink = playlistPermalink,
+            playlistUser = playlistUser,
+            onDismissRequest = { showEditDialog = false },
+            onSave = { title, description, sharing, tagList, genre, setType, releaseDate, permalink ->
+                showEditDialog = false
+                // Routes through DownloadManager so the local DB stays in sync, the
+                // online track list is preserved (trackUrns re-fetched) and DataDome
+                // 403 captchas are handled — same path as Android.
+                DownloadManager.editPlaylistMetadata(
+                    playlistId = currentIdLong,
+                    newTitle = title,
+                    newDescription = description,
+                    newSharing = sharing,
+                    newTagList = tagList,
+                    newPermalink = permalink,
+                    newGenre = genre,
+                    newSetType = setType,
+                    newReleaseDate = releaseDate
+                )
+                playlistTitle = title
+                playlistDescription = description
+                playlistSharing = sharing
+                playlistTagList = tagList
+                playlistGenre = genre
+                playlistSetType = setType
+                playlistReleaseDate = releaseDate
+                playlistPermalink = permalink
+            }
+        )
+    }
+
+    val playbackContext = remember(playlistId, playlistTitle, playlistCover, playlistUser, isAlbum) {
+        val creatorName = playlistUser?.username
+        val isVerified = playlistUser?.verified == true
+        when {
+            playlistId == "likes" -> PlaybackContext(str("context_playlist", str("lib_liked_tracks")), "likes", null, artistName = null)
+            playlistId == "downloads" -> PlaybackContext(str("context_playlist", str("lib_downloads")), "downloads", null, artistName = null)
+            playlistId.startsWith("station") || playlistId.startsWith("yt_radio:") ->
+                PlaybackContext(str("context_station", playlistTitle), playlistId, playlistCover, artistName = null, isVerified = isVerified)
+            isAlbum -> PlaybackContext(str("context_album", playlistTitle), playlistId, playlistCover, artistName = creatorName, isVerified = isVerified)
+            else -> PlaybackContext(str("context_playlist", playlistTitle), playlistId, playlistCover, artistName = creatorName, isVerified = isVerified)
+        }
+    }
+
+    // ---------------------------------------------------------------- layout
+
+    val backgroundColor = MaterialTheme.colorScheme.surfaceContainerLow
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        // Blurred cover backdrop fading into the panel background.
+        if (!playlistCover.isNullOrEmpty()) {
+            Box(modifier = Modifier.fillMaxWidth().height(340.dp)) {
+                AsyncImage(
+                    model = ImageRequest.Builder(PlatformContext.INSTANCE)
+                        .data(playlistCover)
+                        .size(Size(128, 128))
+                        .build(),
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize().blur(40.dp).alpha(0.5f),
+                    contentScale = ContentScale.Crop
+                )
+                Box(
+                    modifier = Modifier.fillMaxSize().background(
+                        Brush.verticalGradient(
+                            colors = listOf(
+                                Color.Transparent,
+                                backgroundColor.copy(alpha = 0.3f),
+                                backgroundColor.copy(alpha = 0.8f),
+                                backgroundColor
+                            )
+                        )
+                    )
+                )
+            }
+        }
+
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(bottom = 24.dp)
+        ) {
+            // -------- header: cover + meta + actions
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(24.dp).padding(top = 32.dp),
+                    verticalAlignment = Alignment.Bottom
+                ) {
+                    Card(shape = RoundedCornerShape(12.dp), elevation = CardDefaults.cardElevation(12.dp), modifier = Modifier.size(180.dp)) {
+                        if (!playlistCover.isNullOrEmpty()) {
+                            AsyncImage(model = playlistCover, contentDescription = null, modifier = Modifier.fillMaxSize().viewableCover(playlistCover), contentScale = ContentScale.Crop)
+                        } else if (defaultIcon != null) {
+                            Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceContainerHigh), contentAlignment = Alignment.Center) {
+                                Icon(defaultIcon!!, null, modifier = Modifier.size(72.dp), tint = MaterialTheme.colorScheme.primary)
+                            }
+                        } else {
+                            Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
+                                Icon(if (isArtistView) Icons.Rounded.Person else Icons.Default.MusicNote, null, modifier = Modifier.size(72.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                    Spacer(Modifier.width(24.dp))
+                    Column(Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = playlistTitle,
+                                style = MaterialTheme.typography.headlineLarge,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false)
+                            )
+                            if (playlistSharing == "private" || playlistSharing == "secret") {
+                                Spacer(Modifier.width(8.dp))
+                                Icon(Icons.Rounded.Lock, null, modifier = Modifier.size(24.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                        if (isArtistView) {
+                            val providerBadge = when {
+                                isQobuzArtist -> str("generic_artist") + " • Qobuz"
+                                isDeezerArtist -> str("generic_artist") + " • Deezer"
+                                isTidalArtist -> str("generic_artist") + " • TIDAL"
+                                else -> str("generic_artist")
+                            }
+                            Spacer(Modifier.height(4.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f)
+                                ) {
+                                    Text(
+                                        text = providerBadge,
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                    )
+                                }
+                            }
+                        } else if (playlistUser != null && playlistUser!!.id > 0) {
+                            val ownerInteraction = remember { MutableInteractionSource() }
+                            val ownerHovered by ownerInteraction.collectIsHoveredAsState()
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .hoverable(ownerInteraction)
+                                    .pointerHoverIcon(PointerIcon.Hand)
+                                    .clickable(interactionSource = ownerInteraction, indication = null) {
+                                        val owner = playlistUser!!
+                                        val ownerUrn = owner.urn ?: ""
+                                        val uniqueArtists = playlistArtists.distinctBy { it.id.ifBlank { it.name } }
+                                        when {
+                                            // A record credited to several artists asks which one to open.
+                                            uniqueArtists.count { it.id.isNotBlank() } > 1 ->
+                                                playerViewModel.navigateToArtistChoice(uniqueArtists, owner.id)
+                                            ownerUrn.startsWith("spotify:artist:") ->
+                                                playerViewModel.navigateToSpotifyArtist(ownerUrn.removePrefix("spotify:artist:"))
+                                            else -> playerViewModel.navigateToArtist(owner.id)
+                                        }
+                                    }
+                            ) {
+                                Text(
+                                    str("playlist_by_user", playlistUser!!.username ?: ""),
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    textDecoration = if (ownerHovered) TextDecoration.Underline else null
+                                )
+                                if (playlistUser?.verified == true) {
+                                    Spacer(Modifier.width(4.dp))
+                                    Icon(Icons.Rounded.Verified, null, tint = if (playlistUser?.urn?.startsWith("spotify") == true) androidx.compose.ui.graphics.Color(0xFF1DB954) else MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                                }
+                            }
+                        } else if (playlistUser?.username != null) {
+                            Text(
+                                str("playlist_by_user", playlistUser?.username ?: str("me_artist")),
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                            )
+                        }
+                        Spacer(Modifier.height(4.dp))
+
+                        // Catalog subtitle ("2025 • Album" / follower count)
+                        if (!playlistMetaSubtitle.isNullOrBlank()) {
+                            Text(
+                                text = playlistMetaSubtitle!!,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                            )
+                            Spacer(Modifier.height(2.dp))
+                        }
+
+                        val totalDurationMs = tracksToDisplay.sumOf { it.durationMs ?: 0L }
+                        val durationText = formatPlaylistTotalDuration(totalDurationMs)
+
+                        val trackCountText = when {
+                            isArtistView -> {
+                                val count = tracksToDisplay.size
+                                if (count == 0 && playlistSearchQuery.isNotEmpty()) {
+                                    str("no_tracks_found_filter")
+                                } else {
+                                    val base = str("new_releases_popular_tracks") + " • " + str("playlist_num_tracks", count)
+                                    if (durationText.isNotEmpty()) "$base • $durationText" else base
+                                }
+                            }
+                            isYoutubeRadio -> str("radio") + " • YouTube"
+                            isLoading && playlistId != "likes" -> "..."
+                            else -> {
+                                val count = tracksToDisplay.size
+                                if (count == 0 && playlistSearchQuery.isNotEmpty()) {
+                                    str("no_tracks_found_filter")
+                                } else {
+                                    val base = str("playlist_num_tracks", count)
+                                    if (durationText.isNotEmpty()) "$base • $durationText" else base
+                                }
+                            }
+                        }
+                        if (trackCountText.isNotEmpty()) {
+                            Text(trackCountText, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f), style = MaterialTheme.typography.bodyMedium)
+                        }
+                        Spacer(Modifier.height(12.dp))
+
+                        // Action row
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (tracksToDisplay.isNotEmpty()) {
+                                Button(shapes = ButtonDefaults.shapes(), onClick = { playerViewModel.playPlaylist(tracksToDisplay.toList(), 0, playbackContext) },
+                                    modifier = Modifier.height(44.dp)
+                                ) {
+                                    Icon(Icons.Default.PlayArrow, null)
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(str("btn_play"), fontWeight = FontWeight.Bold)
+                                }
+                                Spacer(Modifier.width(8.dp))
+                                FilledTonalButton(shapes = ButtonDefaults.shapes(), onClick = { playerViewModel.playPlaylist(tracksToDisplay.toList().shuffled(), context = playbackContext) },
+                                    modifier = Modifier.height(44.dp)
+                                ) {
+                                    Icon(Icons.Default.Shuffle, null)
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(str("btn_shuffle"), fontWeight = FontWeight.Bold)
+                                }
+                                Spacer(Modifier.width(8.dp))
+                            }
+
+                            if ((isLocalPlaylist || isUserCreated) && !isYoutubeRadio) {
+                                IconButton(shapes = IconButtonDefaults.shapes(), onClick = { 
+                                    if (isUserCreated) showEditDialog = true else showRenameDialog = true 
+                                }) {
+                                    Icon(Icons.Outlined.Edit, str("profile_edit"))
+                                }
+                                IconButton(onClick = {
+                                    val dialog = FileDialog(null as Frame?, str("storage_change_btn"), FileDialog.LOAD)
+                                    dialog.setFilenameFilter { _, name ->
+                                        name.endsWith(".png", true) || name.endsWith(".jpg", true) || name.endsWith(".jpeg", true) || name.endsWith(".webp", true)
+                                    }
+                                    dialog.isVisible = true
+                                    val file = dialog.files.firstOrNull()
+                                    if (file != null && currentIdLong != 0L) DownloadManager.updatePlaylistCover(currentIdLong, file, title = playlistTitle, artist = playlistUser?.username)
+                                }) {
+                                    Icon(Icons.Outlined.Image, str("storage_change_btn"))
+                                }
+                            }
+
+                            if (playlistId != "downloads" && playlistId != "likes" && playlistId != "local_files") {
+                                if (isUserCreated) {
+                                    IconButton(onClick = { showDeleteDialog = true }) {
+                                        Icon(Icons.Default.Delete, str("btn_delete"), tint = MaterialTheme.colorScheme.error)
+                                    }
+                                } else {
+                                    val isPlaylistLiked = likedPlaylistsRepo.contains(stableId)
+                                    IconButton(onClick = {
+                                        if (!isPlaylistLiked) {
+                                            val targetPlaylist = Playlist(
+                                                id = stableId,
+                                                title = playlistTitle,
+                                                artworkUrl = playlistCover,
+                                                calculatedArtworkUrl = null,
+                                                trackCount = tracksToDisplay.size,
+                                                user = playlistUser ?: User(0, playlistUser?.username ?: "", null),
+                                                tracks = tracksToDisplay.toList(),
+                                                isAlbum = isAlbum,
+                                                permalinkUrl = playlistPermalinkUrl ?: shareUrl,
+                                                urn = playlistUrn
+                                            )
+                                            DownloadManager.importPlaylistToLibrary(
+                                                playlist = targetPlaylist,
+                                                tracks = tracksToDisplay.toList(),
+                                                syncToCloud = !(playlistId.startsWith("spotify") || playlistId.startsWith("station_spotify") || playlistUrn?.startsWith("spotify:") == true || playlistPermalinkUrl?.contains("spotify") == true),
+                                                likePlaylist = true
+                                            )
+                                        } else {
+                                            LikeRepository.togglePlaylistLike(
+                                                stableId,
+                                                false,
+                                                playlistPermalinkUrl,
+                                                playlistUrn
+                                            )
+                                        }
+                                    }) {
+                                        if (isPlaylistLiked) Icon(Icons.Rounded.Favorite, str("lib_liked_tracks"), tint = MaterialTheme.colorScheme.primary)
+                                        else Icon(Icons.Outlined.FavoriteBorder, str("menu_add_playlist"))
+                                    }
+                                }
+                            }
+
+                            if (!isYoutubeRadio && playlistId != "downloads" && tracksToDisplay.isNotEmpty()) {
+                                IconButton(onClick = {
+                                    val targetBatchId = if (playlistId == "likes") DownloadManager.LIKES_BATCH_ID else stableId
+                                    if (isPlaylistDownloading) {
+                                        DownloadManager.cancelBatch(targetBatchId)
+                                    } else if (isFullyDownloaded) {
+                                        showRemoveDownloadDialog = true
+                                    } else {
+                                        if (playlistId == "likes") {
+                                            DownloadManager.downloadBatch(tracksToDisplay.toList(), DownloadManager.LIKES_BATCH_ID)
+                                        } else if (stableId != 0L) {
+                                            val fakePlaylist = Playlist(
+                                                id = stableId,
+                                                title = playlistTitle,
+                                                artworkUrl = playlistCover,
+                                                calculatedArtworkUrl = null,
+                                                trackCount = tracks.size,
+                                                user = playlistUser,
+                                                tracks = null,
+                                                permalinkUrl = playlistPermalinkUrl,
+                                                urn = playlistUrn,
+                                                isAlbum = isAlbum
+                                            )
+                                            DownloadManager.downloadPlaylist(fakePlaylist, tracks.toList())
+                                        }
+                                    }
+                                }) {
+                                    when {
+                                        isPlaylistDownloading -> Icon(Icons.Rounded.Close, str("btn_cancel"))
+                                        isFullyDownloaded -> Icon(Icons.Rounded.Delete, str("btn_delete"), tint = MaterialTheme.colorScheme.error)
+                                        else -> Icon(Icons.Rounded.Download, str("btn_download"))
+                                    }
+                                }
+                            }
+
+                            // Overflow menu: queue actions + share
+                            Box {
+                                IconButton(onClick = { showOptionsMenu = true }) {
+                                    Icon(Icons.Default.MoreVert, str("btn_options"))
+                                }
+                                DropdownMenu(expanded = showOptionsMenu, onDismissRequest = { showOptionsMenu = false }) {
+                                    if (!isYoutubeRadio) {
+                                        DropdownMenuItem(
+                                            text = { Text(str("menu_play_next")) },
+                                            leadingIcon = { Icon(Icons.AutoMirrored.Rounded.PlaylistPlay, null) },
+                                            onClick = { playerViewModel.insertNext(tracksToDisplay.toList()); showOptionsMenu = false }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text(str("menu_add_queue")) },
+                                            leadingIcon = { Icon(Icons.AutoMirrored.Rounded.QueueMusic, null) },
+                                            onClick = { playerViewModel.addToQueue(tracksToDisplay.toList()); showOptionsMenu = false }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text(str("menu_add_playlist")) },
+                                            leadingIcon = { Icon(Icons.Default.Add, null) },
+                                            onClick = { playerViewModel.prepareBulkAdd(tracksToDisplay.toList()); showOptionsMenu = false }
+                                        )
+                                    }
+                                    if (isAlbum && tracksToDisplay.isNotEmpty() && !isYoutubeRadio) {
+                                        DropdownMenuItem(
+                                            text = { Text(str("menu_like_all_songs")) },
+                                            leadingIcon = { Icon(Icons.Rounded.Favorite, null) },
+                                            onClick = {
+                                                showOptionsMenu = false
+                                                val likedCount =
+                                                    com.alananasss.kittytune.data.LikeRepository.addLikesBulk(tracksToDisplay.toList())
+                                                if (likedCount > 0) {
+                                                    com.alananasss.kittytune.core.Toaster.show(str("toast_like_all_done", likedCount))
+                                                } else {
+                                                    com.alananasss.kittytune.core.Toaster.show(str("toast_like_all_nothing"))
+                                                }
+                                            }
+                                        )
+                                    }
+                                    val isSystemPlaylist = playlistId.startsWith("system_playlist:")
+                                    if (!isLocalPlaylist && (currentIdLong > 0 || isSystemPlaylist) && !isYoutubeRadio &&
+                                        !playlistId.startsWith("station") && playlistId != "likes" &&
+                                        playlistId != "downloads" && playlistId != "local_files"
+                                    ) {
+                                        DropdownMenuItem(
+                                            text = { Text(str("menu_playlist_details")) },
+                                            leadingIcon = { Icon(Icons.Rounded.Info, null) },
+                                            onClick = { showOptionsMenu = false; showDetailsSheet = true }
+                                        )
+                                    }
+                                    playlistUser?.id?.takeIf { it > 0 }?.let { ownerId ->
+                                        DropdownMenuItem(
+                                            text = { Text(str("menu_go_artist")) },
+                                            leadingIcon = { Icon(Icons.Default.Person, null) },
+                                            onClick = { showOptionsMenu = false; playerViewModel.navigateToArtist(ownerId) }
+                                        )
+                                    }
+                                    if (shareUrl.isNotEmpty()) {
+                                        DropdownMenuItem(
+                                            text = { Text(str("btn_share")) },
+                                            leadingIcon = { Icon(Icons.Rounded.ContentCopy, null) },
+                                            onClick = {
+                                                Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(shareUrl), null)
+                                                showOptionsMenu = false
+                                            }
+                                        )
+                                    }
+                                    if (!isYoutubeRadio && stableId != 0L &&
+                                        playlistId != "likes" && playlistId != "downloads" && playlistId != "local_files"
+                                    ) {
+                                        DropdownMenuItem(
+                                            text = { Text(str(if (isUserCreated) "menu_delete_playlist" else "dialog_delete_playlist_from_lib_title")) },
+                                            leadingIcon = { Icon(Icons.Rounded.Delete, null) },
+                                            onClick = {
+                                                showOptionsMenu = false
+                                                showDeleteDialog = true
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // -------- playlist download progress
+            item {
+                AnimatedVisibility(
+                    visible = isPlaylistDownloading && currentPlaylistProgress != null,
+                    enter = fadeIn() + expandVertically(),
+                    exit = fadeOut() + shrinkVertically()
+                ) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(top = 8.dp, bottom = 24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        val percentage = ((currentPlaylistProgress ?: 0f) * 100).toInt()
+                        Text(
+                            str("playlist_downloading_progress", percentage),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        LinearWavyProgressIndicator(
+                            progress = { currentPlaylistProgress ?: 0f },
+                            modifier = Modifier.fillMaxWidth(),
+                            color = MaterialTheme.colorScheme.primary,
+                            trackColor = MaterialTheme.colorScheme.surfaceVariant
+                        )
+                    }
+                }
+            }
+
+            // -------- "downloads" root: playlist grid section
+            if (playlistId == "downloads" && downloadedPlaylists.isNotEmpty()) {
+                item {
+                    Text(
+                        str("lib_playlists"),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp)
+                    )
+                }
+                val chunkedPlaylists = downloadedPlaylists.chunked(4)
+                items(chunkedPlaylists.size) { index ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        for (playlist in chunkedPlaylists[index]) {
+                            Box(modifier = Modifier.weight(1f)) {
+                                PlaylistSquareCard(playlist = playlist) {
+                                    val id = if (playlist.id < 0) "local_playlist:${playlist.id}" else playlist.id.toString()
+                                    onNavigate("downloaded_section:$id")
+                                }
+                            }
+                        }
+                        repeat(4 - chunkedPlaylists[index].size) { Spacer(modifier = Modifier.weight(1f)) }
+                    }
+                }
+                if (tracksToDisplay.isNotEmpty()) {
+                    item {
+                        Text(
+                            str("profile_tracks"),
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp)
+                        )
+                    }
+                }
+            }
+
+            // -------- track list
+            if (isLoading && playlistId != "likes") {
+                items(10) { TrackListItemShimmer() }
+            } else {
+                val isReallyEmpty = rawTracks.isEmpty() &&
+                    (playlistId != "downloads" || downloadedPlaylists.isEmpty()) &&
+                    !isYoutubeRadio
+
+                if (isReallyEmpty) {
+                    item { EmptyPlaylistView(playlistId = playlistId, isUserCreated = isUserCreated, isEmptySearch = playlistSearchQuery.isNotEmpty()) }
+                } else {
+                    if (isYoutubeRadio && rawTracks.isEmpty()) {
+                        item {
+                            Box(modifier = Modifier.fillMaxWidth().height(200.dp), contentAlignment = Alignment.Center) {
+                                CircularWavyProgressIndicator()
+                            }
+                        }
+                    }
+                    if (rawTracks.isNotEmpty()) {
+                        item(key = "search_and_sort") {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                OutlinedTextField(
+                                    value = playlistSearchQuery,
+                                    onValueChange = { playlistSearchQuery = it },
+                                    placeholder = {
+                                        Text(str("search_playlist_hint"), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    },
+                                    leadingIcon = { Icon(Icons.Default.Search, null) },
+                                    trailingIcon = {
+                                        if (playlistSearchQuery.isNotEmpty()) {
+                                            IconButton(onClick = {
+                                                playlistSearchQuery = ""
+                                                focusManager.clearFocus()
+                                            }) { Icon(Icons.Rounded.Close, null) }
+                                        }
+                                    },
+                                    singleLine = true,
+                                    shape = CircleShape,
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+                                    ),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .trackTextInput()
+                                        .escapeDismisses {
+                                            playlistSearchQuery = ""
+                                            focusManager.clearFocus()
+                                        }
+                                )
+                                Box {
+                                    FilledTonalIconButton(onClick = { showSortMenu = true }) {
+                                        Icon(Icons.Rounded.Sort, str("btn_options"))
+                                    }
+                                    DropdownMenu(expanded = showSortMenu, onDismissRequest = { showSortMenu = false }) {
+                                        val options = listOf(
+                                            TrackSortBy.FIRST_ADDED to str("sort_first_added"),
+                                            TrackSortBy.RECENTLY_ADDED to str("sort_recently_added"),
+                                            TrackSortBy.TITLE_AZ to str("sort_title_az"),
+                                            TrackSortBy.ARTIST_AZ to str("sort_artist_az")
+                                        )
+                                        options.forEach { (sortType, label) ->
+                                            DropdownMenuItem(
+                                                text = {
+                                                    Text(
+                                                        label,
+                                                        fontWeight = if (playlistSortBy == sortType) FontWeight.Bold else FontWeight.Normal,
+                                                        color = if (playlistSortBy == sortType) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                                    )
+                                                },
+                                                trailingIcon = {
+                                                    if (playlistSortBy == sortType) Icon(Icons.Rounded.Check, null, tint = MaterialTheme.colorScheme.primary)
+                                                },
+                                                onClick = { playlistSortBy = sortType; showSortMenu = false }
+                                            )
+                                        }
+                                    }
+                                }
+                                // Spotify-style view mode picker (Compact / List)
+                                Box {
+                                    val viewMode = TrackViewModePref.mode
+                                    TextButton(
+                                        onClick = { showViewModeMenu = true },
+                                        shape = CircleShape,
+                                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    ) {
+                                        Text(
+                                            if (viewMode == TrackViewMode.COMPACT) str("view_mode_compact") else str("view_mode_list"),
+                                            style = MaterialTheme.typography.bodyMedium
+                                        )
+                                        Spacer(Modifier.width(6.dp))
+                                        Icon(
+                                            if (viewMode == TrackViewMode.COMPACT) Icons.Rounded.Menu else Icons.AutoMirrored.Rounded.FormatListBulleted,
+                                            str("lib_view_mode"),
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                    DropdownMenu(expanded = showViewModeMenu, onDismissRequest = { showViewModeMenu = false }) {
+                                        Text(
+                                            str("lib_view_mode"),
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                                        )
+                                        val modes = listOf(
+                                            Triple(TrackViewMode.COMPACT, str("view_mode_compact"), Icons.Rounded.Menu),
+                                            Triple(TrackViewMode.LIST, str("view_mode_list"), Icons.AutoMirrored.Rounded.FormatListBulleted)
+                                        )
+                                        modes.forEach { (mode, label, icon) ->
+                                            val selected = viewMode == mode
+                                            DropdownMenuItem(
+                                                text = {
+                                                    Text(
+                                                        label,
+                                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                                        color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                                    )
+                                                },
+                                                leadingIcon = {
+                                                    Icon(icon, null, tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                                                },
+                                                trailingIcon = {
+                                                    if (selected) Icon(Icons.Rounded.Check, null, tint = MaterialTheme.colorScheme.primary)
+                                                },
+                                                onClick = { TrackViewModePref.set(mode); showViewModeMenu = false }
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            Spacer(Modifier.height(8.dp))
+                        }
+                        if (tracksToDisplay.isEmpty() && playlistSearchQuery.isNotEmpty()) {
+                            item { EmptyPlaylistView(playlistId = playlistId, isUserCreated = isUserCreated, isEmptySearch = true) }
+                        }
+                    }
+
+                    if (tracksToDisplay.isNotEmpty()) {
+                        item(key = "table_header") {
+                            if (TrackViewModePref.mode == TrackViewMode.COMPACT) {
+                                TrackCompactHeaderRow(showAlbum = !isAlbum, showDate = showDateColumn, releaseDateMode = useReleaseDate)
+                            } else {
+                                TrackTableHeaderRow(showAlbum = !isAlbum, showDate = showDateColumn, releaseDateMode = useReleaseDate)
+                            }
+                        }
+                    }
+
+                    itemsIndexed(
+                        items = tracksToDisplay,
+                        key = { index, t -> getPlaylistTrackStableKey(index, t.id, tracksToDisplay) }
+                    ) { index, track ->
+                        if (index >= tracksToDisplay.size - 5 && isYoutubeRadio) {
+                            LaunchedEffect(Unit) { youtubeRadioViewModel.loadMore() }
+                        }
+
+                        val progress = downloadProgress[track.id]
+                        val isDownloading = progress != null
+                        val isDownloaded = remember(track.id, downloadedIds) {
+                            (track.id < 0 && track.source != "youtube") || downloadedIds.contains(track.id)
+                        }
+
+                        val itemKey = getPlaylistTrackStableKey(index, track.id, tracksToDisplay)
+                        ReorderableItem(reorderableState, key = itemKey) { isDraggingThis ->
+                            val dragHandleModifier = if (canReorder)
+                                Modifier.draggableHandle()
+                            else Modifier
+
+                            if (TrackViewModePref.mode == TrackViewMode.COMPACT) {
+                                TrackCompactItem(
+                                    track = track,
+                                    currentlyPlayingTrack = playerViewModel.uiCurrentTrack,
+                                    index = index,
+                                    isDownloading = isDownloading,
+                                    isDownloaded = isDownloaded,
+                                    downloadProgress = progress ?: 0,
+                                    showLikeIndicator = playlistId != "likes",
+                                    onClick = { playerViewModel.playPlaylist(tracksToDisplay.toList(), index, playbackContext) },
+                                    onOptionClick = {
+                                        val contextId = if (isUserCreated || isDownloadedView) currentIdLong else null
+                                        playerViewModel.showTrackOptions(track, contextId)
+                                    },
+                                    onAlbumClick = { onNavigate(it) },
+                                    onArtistClick = { playerViewModel.navigateToTrackArtist(it) },
+                                    showAlbum = !isAlbum,
+                                    showDate = showDateColumn,
+                                    dragHandleModifier = dragHandleModifier,
+                                    isDragging = isDraggingThis
+                                )
+                            } else {
+                                TrackTableItem(
+                                    track = track,
+                                    currentlyPlayingTrack = playerViewModel.uiCurrentTrack,
+                                    index = index,
+                                    isDownloading = isDownloading,
+                                    isDownloaded = isDownloaded,
+                                    downloadProgress = progress ?: 0,
+                                    showVerifiedBadge = false,
+                                    showLikeIndicator = playlistId != "likes",
+                                    onClick = { playerViewModel.playPlaylist(tracksToDisplay.toList(), index, playbackContext) },
+                                    onOptionClick = {
+                                        val contextId = if (isUserCreated || isDownloadedView) currentIdLong else null
+                                        playerViewModel.showTrackOptions(track, contextId)
+                                    },
+                                    onAlbumClick = { onNavigate(it) },
+                                    onArtistClick = { playerViewModel.navigateToTrackArtist(it) },
+                                    showAlbum = !isAlbum,
+                                    showDate = showDateColumn,
+                                    useReleaseDate = useReleaseDate,
+                                    dragHandleModifier = dragHandleModifier,
+                                    isDragging = isDraggingThis
+                                )
+                            }
+                        }
+                    }
+                    if (isYoutubeRadio && youtubeRadioViewModel.isLoadingMore) {
+                        item {
+                            Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
+                                CircularWavyProgressIndicator()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+    }
+}
+
+@Composable
+fun PlaylistSquareCard(playlist: Playlist, onClick: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .clickable { onClick() }
+    ) {
+        AsyncImage(
+            model = playlist.thumbnailUrl,
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                .clip(RoundedCornerShape(12.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = playlist.title ?: str("generic_title"),
+            style = MaterialTheme.typography.bodyLarge,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            fontWeight = FontWeight.SemiBold
+        )
+        Text(
+            text = str("playlist_num_tracks", playlist.trackCount ?: 0),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
+fun TrackListItem(
+    track: Track,
+    currentlyPlayingTrack: Track? = null,
+    index: Int,
+    isDownloading: Boolean,
+    isDownloaded: Boolean,
+    downloadProgress: Int,
+    modifier: Modifier = Modifier,
+    showVerifiedBadge: Boolean = true,
+    /**
+     * Off for the liked-tracks list, where every row is liked and the heart says nothing
+     * (issue #33).
+     */
+    showLikeIndicator: Boolean = true,
+    onClick: () -> Unit,
+    onOptionClick: () -> Unit,
+    onArtistClick: ((Track) -> Unit)? = null
+) {
+    val isCurrent = currentlyPlayingTrack?.id == track.id
+    val titleColor = if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+    val titleWeight = if (isCurrent) FontWeight.Bold else FontWeight.SemiBold
+
+    androidx.compose.material3.TextButton(
+        onClick = onClick,
+        shape = RoundedCornerShape(16.dp),
+        colors = androidx.compose.material3.ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface),
+        contentPadding = PaddingValues(0.dp),
+        modifier = modifier
+            .padding(horizontal = 16.dp)
+            .onClick(
+                matcher = PointerMatcher.mouse(PointerButton.Secondary),
+                onClick = onOptionClick
+            )
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp).fillMaxWidth().height(64.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                AsyncImage(
+                    model = track.thumbnailUrl,
+                    contentDescription = null,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .alpha(if (isDownloading) 0.3f else 1f),
+                    contentScale = ContentScale.Crop
+                )
+                if (isDownloading) {
+                    CircularWavyProgressIndicator(
+                        progress = { downloadProgress / 100f },
+                        modifier = Modifier.size(28.dp),
+                        color = Color.White,
+                        trackColor = Color.White.copy(alpha = 0.3f)
+                    )
+                }
+                if (isCurrent && !isDownloading) {
+                    Box(
+                        modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp))
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Rounded.GraphicEq, str("player_playing_now"), tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(24.dp))
+                    }
+                }
+            }
+            Spacer(Modifier.width(16.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = track.title ?: str("untitled_track"),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    fontWeight = titleWeight,
+                    color = titleColor
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (isDownloaded && !isDownloading) {
+                        Icon(Icons.Rounded.DownloadDone, str("btn_downloaded"), modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.width(4.dp))
+                    }
+                    ArtistLinkText(
+                        track = track,
+                        onArtistClick = onArtistClick,
+                        // Truncates rather than pushing the markers after it off the row.
+                        modifier = Modifier.weight(1f, fill = false),
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    if (showVerifiedBadge && track.user?.verified == true) {
+                        Spacer(Modifier.width(4.dp))
+                        Icon(Icons.Rounded.Verified, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(12.dp))
+                    }
+                    com.alananasss.kittytune.ui.common.TrackRowSocialMarkers(track, showLikeIndicator)
+                }
+            }
+            IconButton(onClick = onOptionClick, modifier = Modifier.size(40.dp)) {
+                Icon(Icons.Default.MoreVert, str("btn_options"), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+@Composable
+fun TrackTableHeaderRow(
+    modifier: Modifier = Modifier,
+    showAlbum: Boolean = true,
+    showDate: Boolean = true,
+    releaseDateMode: Boolean = false,
+    showPlays: Boolean = false
+) {
+    var weightedWidthPx by remember { mutableStateOf(0f) }
+    Column(modifier = modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 32.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = str("table_header_index"),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.width(48.dp),
+                textAlign = TextAlign.Center,
+                maxLines = 1
+            )
+            Spacer(Modifier.width(16.dp))
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .onGloballyPositioned { weightedWidthPx = it.size.width.toFloat() },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = str("table_header_title"),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(TrackTableColumns.title),
+                    maxLines = 1
+                )
+                if (showAlbum || showDate) {
+                    ColumnDragHandle(divider = 0, weightedWidthPx = { weightedWidthPx }, albumVisible = showAlbum, dateVisible = showDate)
+                }
+                if (showAlbum) {
+                    Text(
+                        text = str("table_header_album"),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(TrackTableColumns.album),
+                        maxLines = 1
+                    )
+                    if (showDate) {
+                        ColumnDragHandle(divider = 1, weightedWidthPx = { weightedWidthPx }, albumVisible = true, dateVisible = true)
+                    }
+                }
+                if (showDate) {
+                    val headerText = when {
+                        showPlays -> str("table_header_plays")
+                        releaseDateMode -> str("table_header_release_date")
+                        else -> str("table_header_date_added")
+                    }
+                    Text(
+                        text = headerText,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(TrackTableColumns.date),
+                        maxLines = 1
+                    )
+                }
+            }
+            Box(modifier = Modifier.width(60.dp).padding(end = 16.dp), contentAlignment = Alignment.CenterEnd) {
+                Icon(
+                    imageVector = Icons.Rounded.Schedule,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+            Spacer(Modifier.width(40.dp))
+        }
+        HorizontalDivider(
+            modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp),
+            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+        )
+    }
+}
+
+/** Spotify-style draggable column divider in the track table header. */
+@Composable
+private fun ColumnDragHandle(divider: Int, weightedWidthPx: () -> Float, albumVisible: Boolean, dateVisible: Boolean) {
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    val dragState = rememberDraggableState { deltaPx ->
+        val w = weightedWidthPx()
+        if (w > 0f) TrackTableColumns.drag(divider, deltaPx / w * TrackTableColumns.total(albumVisible, dateVisible), albumVisible, dateVisible)
+    }
+    Box(
+        modifier = Modifier
+            .width(COLUMN_GAP)
+            .height(20.dp)
+            .hoverable(interaction)
+            .pointerHoverIcon(PointerIcon(java.awt.Cursor(java.awt.Cursor.E_RESIZE_CURSOR)))
+            .draggable(
+                state = dragState,
+                orientation = Orientation.Horizontal,
+                onDragStopped = { TrackTableColumns.save() }
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            Modifier
+                .width(if (hovered) 2.dp else 1.dp)
+                .fillMaxHeight()
+                .background(
+                    if (hovered) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.outlineVariant
+                )
+        )
+    }
+}
+
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+fun TrackTableItem(
+    track: Track,
+    currentlyPlayingTrack: Track? = null,
+    index: Int,
+    isDownloading: Boolean,
+    isDownloaded: Boolean,
+    downloadProgress: Int,
+    modifier: Modifier = Modifier,
+    showVerifiedBadge: Boolean = true,
+    /** Off for the liked-tracks list, where every row is liked (issue #33). */
+    showLikeIndicator: Boolean = true,
+    onClick: () -> Unit,
+    onOptionClick: () -> Unit,
+    onAlbumClick: (String) -> Unit,
+    onArtistClick: ((Track) -> Unit)? = null,
+    showAlbum: Boolean = true,
+    showDate: Boolean = true,
+    useReleaseDate: Boolean = false,
+    showPlays: Boolean = false,
+    onPlayCountClick: (() -> Unit)? = null,
+    dragHandleModifier: Modifier = Modifier,
+    isDragging: Boolean = false
+) {
+    val isCurrent = currentlyPlayingTrack?.id == track.id
+    val titleColor = if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+    val titleWeight = if (isCurrent) FontWeight.Bold else FontWeight.SemiBold
+
+    val albumState by AlbumResolver.stateFor(track).collectAsState()
+    LaunchedEffect(track.id, showAlbum) { if (showAlbum) AlbumResolver.requestResolve(track) }
+
+    androidx.compose.material3.TextButton(
+        onClick = onClick,
+        shape = RoundedCornerShape(8.dp),
+        colors = androidx.compose.material3.ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface),
+        contentPadding = PaddingValues(0.dp),
+        modifier = modifier
+            .padding(horizontal = 16.dp)
+            .background(
+                if (isDragging) MaterialTheme.colorScheme.surfaceContainerHigh else Color.Transparent,
+                RoundedCornerShape(8.dp)
+            )
+            .onClick(
+                matcher = PointerMatcher.mouse(PointerButton.Secondary),
+                onClick = onOptionClick
+            )
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp).fillMaxWidth().height(56.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(modifier = Modifier.width(48.dp), contentAlignment = Alignment.Center) {
+                if (dragHandleModifier != Modifier) {
+                    Icon(
+                        Icons.Rounded.DragHandle,
+                        null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp).then(dragHandleModifier).pointerHoverIcon(PointerIcon.Hand)
+                    )
+                } else if (isCurrent && !isDownloading) {
+                    Icon(Icons.Rounded.GraphicEq, str("player_playing_now"), tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                } else {
+                    Text(
+                        text = (index + 1).toString(),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Visible
+                    )
+                }
+            }
+            Spacer(Modifier.width(16.dp))
+            Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+            Row(modifier = Modifier.weight(TrackTableColumns.title), verticalAlignment = Alignment.CenterVertically) {
+                Box(contentAlignment = Alignment.Center) {
+                    AsyncImage(
+                        model = track.thumbnailUrl,
+                        contentDescription = null,
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .alpha(if (isDownloading) 0.3f else 1f),
+                        contentScale = ContentScale.Crop
+                    )
+                    if (isDownloading) {
+                        CircularWavyProgressIndicator(
+                            progress = { downloadProgress / 100f },
+                            modifier = Modifier.size(24.dp),
+                            color = Color.White,
+                            trackColor = Color.White.copy(alpha = 0.3f)
+                        )
+                    }
+                }
+                Spacer(Modifier.width(12.dp))
+                Column {
+                    Text(
+                        text = track.title ?: str("untitled_track"),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        fontWeight = titleWeight,
+                        color = titleColor,
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (isDownloaded && !isDownloading) {
+                            Icon(Icons.Rounded.DownloadDone, str("btn_downloaded"), modifier = Modifier.size(12.dp), tint = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.width(4.dp))
+                        }
+                        ArtistLinkText(
+                            track = track,
+                            onArtistClick = onArtistClick,
+                            // Truncates rather than pushing the markers after it off the row.
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                        if (showVerifiedBadge && track.user?.verified == true) {
+                            Spacer(Modifier.width(4.dp))
+                            Icon(Icons.Rounded.Verified, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(12.dp))
+                        }
+                        com.alananasss.kittytune.ui.common.TrackRowSocialMarkers(track, showLikeIndicator)
+                    }
+                }
+            }
+            if (showAlbum) {
+                Spacer(Modifier.width(COLUMN_GAP))
+                Box(modifier = Modifier.weight(TrackTableColumns.album).padding(end = 8.dp), contentAlignment = Alignment.CenterStart) {
+                // Catalog tracks know their album upfront: link it directly.
+                val spotifyAlbumId = if (track.source == "spotify") track.publisherMetadata?.albumId?.takeIf { it.isNotBlank() } else null
+                val spotifyAlbumTitle = track.publisherMetadata?.albumTitle
+                when {
+                    spotifyAlbumId != null -> {
+                        val interaction = remember { MutableInteractionSource() }
+                        val hovered by interaction.collectIsHoveredAsState()
+                        Text(
+                            text = spotifyAlbumTitle ?: str("profile_tab_albums"),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (hovered) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                            textDecoration = if (hovered) TextDecoration.Underline else null,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier
+                                .hoverable(interaction)
+                                .pointerHoverIcon(PointerIcon.Hand)
+                                .clickable(interactionSource = interaction, indication = null) {
+                                    onAlbumClick("spotify:album:$spotifyAlbumId")
+                                }
+                        )
+                    }
+                    else -> {
+                val resolved = albumState as? AlbumResolver.AlbumUiState.Resolved
+                if (resolved != null) {
+                    val albumId = resolved.info.playlistId
+                    if (albumId != null) {
+                        val interaction = remember { MutableInteractionSource() }
+                        val hovered by interaction.collectIsHoveredAsState()
+                        Text(
+                            text = resolved.info.title,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (hovered) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                            textDecoration = if (hovered) TextDecoration.Underline else null,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier
+                                .hoverable(interaction)
+                                .pointerHoverIcon(PointerIcon.Hand)
+                                .clickable(interactionSource = interaction, indication = null) {
+                                    onAlbumClick(albumId.toString())
+                                }
+                        )
+                    } else {
+                        Text(
+                            text = resolved.info.title,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+                }
+                }
+                }
+            }
+            if (showDate || showPlays) {
+                Spacer(Modifier.width(COLUMN_GAP))
+                val playsCount = track.playbackCount
+                if (showPlays && playsCount != null && playsCount > 0) {
+                    val formattedPlays = remember(playsCount) {
+                        java.text.NumberFormat.getNumberInstance(java.util.Locale.FRANCE).format(playsCount)
+                    }
+                    val interaction = remember { MutableInteractionSource() }
+                    val hovered by interaction.collectIsHoveredAsState()
+                    Text(
+                        text = formattedPlays,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (hovered) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                        textDecoration = if (hovered) TextDecoration.Underline else null,
+                        modifier = Modifier
+                            .weight(TrackTableColumns.date)
+                            .hoverable(interaction)
+                            .pointerHoverIcon(PointerIcon.Hand)
+                            .clickable(interactionSource = interaction, indication = null) {
+                                onPlayCountClick?.invoke()
+                            },
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                } else if (showDate) {
+                    // Resolved per visible row: Spotify omits the date from list payloads.
+                    val releaseDate = rememberReleaseDate(track)
+                    val dateStr = remember(track.likedAt, releaseDate, track.createdAt, useReleaseDate) {
+                        track.likedAt?.let {
+                            java.text.SimpleDateFormat("dd MMM yyyy", com.alananasss.kittytune.core.Strings.locale()).format(java.util.Date(it))
+                        } ?: formatApiDate(if (useReleaseDate) (releaseDate ?: track.createdAt) else (track.createdAt ?: releaseDate))
+                    }
+                    Text(
+                        text = dateStr,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(TrackTableColumns.date),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+            }
+            val durationStr = remember(track.durationMs) {
+                track.durationMs?.let {
+                    val totalSecs = it / 1000
+                    val m = totalSecs / 60
+                    val s = totalSecs % 60
+                    String.format("%d:%02d", m, s)
+                } ?: ""
+            }
+            Text(
+                text = durationStr,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.width(60.dp),
+                textAlign = TextAlign.End
+            )
+            IconButton(onClick = onOptionClick, modifier = Modifier.size(40.dp)) {
+                Icon(Icons.Default.MoreVert, str("btn_options"), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+@Composable
+fun TrackCompactHeaderRow(
+    modifier: Modifier = Modifier,
+    showAlbum: Boolean = true,
+    showDate: Boolean = true,
+    releaseDateMode: Boolean = false
+) {
+    var weightedWidthPx by remember { mutableStateOf(0f) }
+    Column(modifier = modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 32.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = str("table_header_index"),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.width(48.dp),
+                textAlign = TextAlign.Center,
+                maxLines = 1
+            )
+            Spacer(Modifier.width(16.dp))
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .onGloballyPositioned { weightedWidthPx = it.size.width.toFloat() },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = str("table_header_title"),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(TrackCompactColumns.title),
+                    maxLines = 1
+                )
+                CompactColumnDragHandle(divider = 0, weightedWidthPx = { weightedWidthPx }, albumVisible = showAlbum, dateVisible = showDate)
+                Text(
+                    text = str("table_header_artist"),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(TrackCompactColumns.artist),
+                    maxLines = 1
+                )
+                if (showAlbum || showDate) {
+                    CompactColumnDragHandle(divider = 1, weightedWidthPx = { weightedWidthPx }, albumVisible = showAlbum, dateVisible = showDate)
+                }
+                if (showAlbum) {
+                    Text(
+                        text = str("table_header_album"),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(TrackCompactColumns.album),
+                        maxLines = 1
+                    )
+                    if (showDate) {
+                        CompactColumnDragHandle(divider = 2, weightedWidthPx = { weightedWidthPx }, albumVisible = true, dateVisible = true)
+                    }
+                }
+                if (showDate) {
+                    Text(
+                        text = str(if (releaseDateMode) "table_header_release_date" else "table_header_date_added"),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(TrackCompactColumns.date),
+                        maxLines = 1
+                    )
+                }
+            }
+            Box(modifier = Modifier.width(60.dp).padding(end = 16.dp), contentAlignment = Alignment.CenterEnd) {
+                Icon(
+                    imageVector = Icons.Rounded.Schedule,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+            Spacer(Modifier.width(40.dp))
+        }
+        HorizontalDivider(
+            modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp),
+            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+        )
+    }
+}
+
+/** Draggable column divider in the compact table header; see [ColumnDragHandle]. */
+@Composable
+private fun CompactColumnDragHandle(divider: Int, weightedWidthPx: () -> Float, albumVisible: Boolean, dateVisible: Boolean) {
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    val dragState = rememberDraggableState { deltaPx ->
+        val w = weightedWidthPx()
+        if (w > 0f) TrackCompactColumns.drag(divider, deltaPx / w * TrackCompactColumns.total(albumVisible, dateVisible), albumVisible, dateVisible)
+    }
+    Box(
+        modifier = Modifier
+            .width(COLUMN_GAP)
+            .height(20.dp)
+            .hoverable(interaction)
+            .pointerHoverIcon(PointerIcon(java.awt.Cursor(java.awt.Cursor.E_RESIZE_CURSOR)))
+            .draggable(
+                state = dragState,
+                orientation = Orientation.Horizontal,
+                onDragStopped = { TrackCompactColumns.save() }
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            Modifier
+                .width(if (hovered) 2.dp else 1.dp)
+                .fillMaxHeight()
+                .background(
+                    if (hovered) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.outlineVariant
+                )
+        )
+    }
+}
+
+/**
+ * Spotify-style compact row: no artwork, artist in its own column, half the
+ * height of [TrackTableItem]. Shares the [TrackCompactColumns] weights with
+ * [TrackCompactHeaderRow] so header and rows stay aligned.
+ */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+fun TrackCompactItem(
+    track: Track,
+    currentlyPlayingTrack: Track? = null,
+    index: Int,
+    isDownloading: Boolean,
+    isDownloaded: Boolean,
+    downloadProgress: Int,
+    modifier: Modifier = Modifier,
+    /** Off for the liked-tracks list, where every row is liked (issue #33). */
+    showLikeIndicator: Boolean = true,
+    onClick: () -> Unit,
+    onOptionClick: () -> Unit,
+    onAlbumClick: (String) -> Unit,
+    onArtistClick: ((Track) -> Unit)? = null,
+    showAlbum: Boolean = true,
+    showDate: Boolean = true,
+    dragHandleModifier: Modifier = Modifier,
+    isDragging: Boolean = false
+) {
+    val isCurrent = currentlyPlayingTrack?.id == track.id
+    val titleColor = if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+    val titleWeight = if (isCurrent) FontWeight.Bold else FontWeight.Medium
+
+    val albumState by AlbumResolver.stateFor(track).collectAsState()
+    LaunchedEffect(track.id, showAlbum) { if (showAlbum) AlbumResolver.requestResolve(track) }
+
+    androidx.compose.material3.TextButton(
+        onClick = onClick,
+        shape = RoundedCornerShape(8.dp),
+        colors = androidx.compose.material3.ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface),
+        contentPadding = PaddingValues(0.dp),
+        modifier = modifier
+            .padding(horizontal = 16.dp)
+            .background(
+                if (isDragging) MaterialTheme.colorScheme.surfaceContainerHigh else Color.Transparent,
+                RoundedCornerShape(8.dp)
+            )
+            .onClick(
+                matcher = PointerMatcher.mouse(PointerButton.Secondary),
+                onClick = onOptionClick
+            )
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp).fillMaxWidth().height(32.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(modifier = Modifier.width(48.dp), contentAlignment = Alignment.Center) {
+                when {
+                    dragHandleModifier != Modifier -> Icon(
+                        Icons.Rounded.DragHandle,
+                        null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(16.dp).then(dragHandleModifier).pointerHoverIcon(PointerIcon.Hand)
+                    )
+                    isDownloading -> CircularWavyProgressIndicator(
+                        progress = { downloadProgress / 100f },
+                        modifier = Modifier.size(18.dp)
+                    )
+                    isCurrent -> Icon(Icons.Rounded.GraphicEq, str("player_playing_now"), tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                    else -> Text(
+                        text = (index + 1).toString(),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Visible
+                    )
+                }
+            }
+            Spacer(Modifier.width(16.dp))
+            Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                Row(modifier = Modifier.weight(TrackCompactColumns.title), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = track.title ?: str("untitled_track"),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        fontWeight = titleWeight,
+                        color = titleColor,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    if (isDownloaded && !isDownloading) {
+                        Spacer(Modifier.width(6.dp))
+                        Icon(Icons.Rounded.DownloadDone, str("btn_downloaded"), modifier = Modifier.size(12.dp), tint = MaterialTheme.colorScheme.primary)
+                    }
+                    // In the compact table the artist has its own fixed column, so the markers ride
+                    // at the end of the title cell instead of after the artist name.
+                    com.alananasss.kittytune.ui.common.TrackRowSocialMarkers(track, showLikeIndicator)
+                }
+                Spacer(Modifier.width(COLUMN_GAP))
+                Box(modifier = Modifier.weight(TrackCompactColumns.artist), contentAlignment = Alignment.CenterStart) {
+                    ArtistLinkText(track = track, onArtistClick = onArtistClick)
+                }
+                if (showAlbum) {
+                    Spacer(Modifier.width(COLUMN_GAP))
+                    Box(modifier = Modifier.weight(TrackCompactColumns.album).padding(end = 8.dp), contentAlignment = Alignment.CenterStart) {
+                        val spotifyAlbumId = if (track.source == "spotify") track.publisherMetadata?.albumId?.takeIf { it.isNotBlank() } else null
+                        when {
+                            spotifyAlbumId != null -> {
+                                val interaction = remember { MutableInteractionSource() }
+                                val hovered by interaction.collectIsHoveredAsState()
+                                Text(
+                                    text = track.publisherMetadata?.albumTitle ?: str("profile_tab_albums"),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = if (hovered) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    textDecoration = if (hovered) TextDecoration.Underline else null,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier
+                                        .hoverable(interaction)
+                                        .pointerHoverIcon(PointerIcon.Hand)
+                                        .clickable(interactionSource = interaction, indication = null) {
+                                            onAlbumClick("spotify:album:$spotifyAlbumId")
+                                        }
+                                )
+                            }
+                            else -> {
+                        val resolved = albumState as? AlbumResolver.AlbumUiState.Resolved
+                        if (resolved != null) {
+                            val albumId = resolved.info.playlistId
+                            if (albumId != null) {
+                                val interaction = remember { MutableInteractionSource() }
+                                val hovered by interaction.collectIsHoveredAsState()
+                                Text(
+                                    text = resolved.info.title,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = if (hovered) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    textDecoration = if (hovered) TextDecoration.Underline else null,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier
+                                        .hoverable(interaction)
+                                        .pointerHoverIcon(PointerIcon.Hand)
+                                        .clickable(interactionSource = interaction, indication = null) {
+                                            onAlbumClick(albumId.toString())
+                                        }
+                                )
+                            } else {
+                                Text(
+                                    text = resolved.info.title,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                            }
+                        }
+                    }
+                }
+                if (showDate) {
+                    val releaseDate = rememberReleaseDate(track)
+                    val dateStr = remember(track.likedAt, releaseDate, track.createdAt) {
+                        track.likedAt?.let {
+                            java.text.SimpleDateFormat("dd MMM yyyy", com.alananasss.kittytune.core.Strings.locale()).format(java.util.Date(it))
+                        } ?: formatApiDate(releaseDate ?: track.createdAt)
+                    }
+                    Spacer(Modifier.width(COLUMN_GAP))
+                    Text(
+                        text = dateStr,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(TrackCompactColumns.date),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+            val durationStr = remember(track.durationMs) {
+                track.durationMs?.let {
+                    val totalSecs = it / 1000
+                    val m = totalSecs / 60
+                    val s = totalSecs % 60
+                    String.format("%d:%02d", m, s)
+                } ?: ""
+            }
+            Text(
+                text = durationStr,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.width(60.dp),
+                textAlign = TextAlign.End
+            )
+            IconButton(onClick = onOptionClick, modifier = Modifier.size(32.dp)) {
+                Icon(Icons.Default.MoreVert, str("btn_options"), tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
+            }
+        }
+    }
+}
+
+@Composable
+fun EmptyPlaylistView(
+    playlistId: String,
+    isUserCreated: Boolean,
+    isEmptySearch: Boolean = false
+) {
+    val (kaomoji, title, subtitle) = when {
+        isEmptySearch -> Triple(str("empty_playlist_search_kaomoji"), str("empty_playlist_search_title"), str("empty_playlist_search_subtitle"))
+        playlistId == "downloads" -> Triple(str("empty_downloads_kaomoji"), str("empty_downloads_title"), str("empty_downloads_subtitle"))
+        isUserCreated -> Triple(str("empty_user_playlist_kaomoji"), str("empty_user_playlist_title"), str("empty_user_playlist_subtitle"))
+        else -> Triple(str("empty_playlist_generic_kaomoji"), str("empty_playlist_generic"), "")
+    }
+
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Spacer(Modifier.height(48.dp))
+        Text(
+            text = kaomoji,
+            style = MaterialTheme.typography.displayMedium,
+            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.8f),
+            modifier = Modifier.padding(bottom = 16.dp)
+        )
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onSurface,
+            textAlign = TextAlign.Center
+        )
+        if (subtitle.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+        }
+        Spacer(Modifier.height(48.dp))
+    }
+}
+
+private fun getPlaylistTrackStableKey(index: Int, trackId: Long, trackList: List<Track>): String {
+    var occurrence = 0
+    val max = index.coerceAtMost(trackList.size)
+    for (i in 0 until max) {
+        if (trackList[i].id == trackId) occurrence++
+    }
+    return "${trackId}_dup$occurrence"
+}
+
+internal fun formatPlaylistTotalDuration(ms: Long): String {
+    if (ms <= 0L) return ""
+    val totalSeconds = (ms + 500) / 1000
+    val totalMinutes = totalSeconds / 60
+    val totalHours = totalMinutes / 60
+    val totalDays = totalHours / 24
+
+    return when {
+        totalDays >= 365 -> {
+            val years = totalDays / 365
+            val remDays = totalDays % 365
+            val months = remDays / 30
+            val days = remDays % 30
+            when {
+                months > 0 -> if (years == 1L) str("playlist_duration_year_months", years, months) else str("playlist_duration_years_months", years, months)
+                days > 0 -> if (years == 1L) str("playlist_duration_year_days", years, days) else str("playlist_duration_years_days", years, days)
+                else -> if (years == 1L) str("playlist_duration_year", years) else str("playlist_duration_years", years)
+            }
+        }
+        totalDays >= 30 -> {
+            val months = totalDays / 30
+            val days = totalDays % 30
+            if (days > 0) {
+                str("playlist_duration_months_days", months, days)
+            } else {
+                str("playlist_duration_months", months)
+            }
+        }
+        totalDays >= 1 -> {
+            val days = totalDays
+            val hours = totalHours % 24
+            if (hours > 0) {
+                str("listening_stats_duration_days_hrs", days, hours)
+            } else {
+                str("playlist_duration_days", days)
+            }
+        }
+        totalHours >= 1 -> {
+            val hours = totalHours
+            val minutes = totalMinutes % 60
+            if (minutes > 0) {
+                str("listening_stats_duration_hr_min", hours, minutes)
+            } else {
+                str("playlist_duration_hours", hours)
+            }
+        }
+        totalMinutes >= 1 -> {
+            str("listening_stats_duration_min", totalMinutes)
+        }
+        else -> {
+            str("listening_stats_duration_sec", totalSeconds)
+        }
+    }
+}
+
