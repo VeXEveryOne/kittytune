@@ -110,6 +110,8 @@ data class UnifiedLyricResult(
 )
 
 class PlayerViewModel(application: Application) : AndroidViewModel(application) {
+    // configure() captures state synchronously in init, including a restored nonempty queue.
+    private val connectQueueWindow = com.alananasss.kittytune.data.sync.ConnectQueueWindow()
 
     private var remotePeer by mutableStateOf<ConnectPeerState?>(null)
     private var remotePosition by mutableLongStateOf(0L)
@@ -5310,10 +5312,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             audio.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC).coerceAtLeast(1)
     }
     private fun connectSnapshot(): PlaybackSnapshot? {
-        if (queueState.isEmpty() || currentQueueIndex !in queueState.indices) return null
-        val start = if (queueState.size > 500) (currentQueueIndex - 250).coerceIn(0, queueState.size - 500) else 0
-        return PlaybackSnapshot(SyncLog.deviceId, System.currentTimeMillis(), queueState.drop(start).take(500),
-            currentQueueIndex - start, currentPosition.coerceAtLeast(0L), isPlaying, shuffleEnabled, repeatMode.name, volume = connectVolume())
+        val window = connectQueueWindow.capture(queueState, currentQueueIndex) ?: return null
+        return PlaybackSnapshot(SyncLog.deviceId, System.currentTimeMillis(), window.queue,
+            window.index, currentPosition.coerceAtLeast(0L), isPlaying, shuffleEnabled, repeatMode.name, volume = connectVolume())
     }
 
     private suspend fun handleConnectCommand(command: ConnectMessage) {
@@ -5342,7 +5343,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             }
             "queue", "remove" -> {
                 val state = connectSnapshot() ?: error("Queue is empty")
-                require(command.value in state.queue.indices.map { it.toLong() }) { "Invalid queue item" }
+                require(command.value in 0L until state.queue.size.toLong()) { "Invalid queue item" }
                 val start = if (queueState.size > 500) (currentQueueIndex - 250).coerceIn(0, queueState.size - 500) else 0
                 val index = command.value.toInt() + start
                 if (command.action == "queue") skipToQueueItem(index) else {
@@ -5369,7 +5370,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 val track = remote.queue[remote.currentIndex]
                 require(track.source != "local") { "Local files are unavailable on another device" }
                 val portable = remote.queue.filter { it.source != "local" }
-                val index = portable.indexOfFirst { it.id == track.id }
+                val index = remote.queue.subList(0, remote.currentIndex).count { it.source != "local" }
                 require(index >= 0)
                 shuffleEnabled = false
                 pendingSeekPosition = remote.positionMs
@@ -5378,13 +5379,21 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 shuffleEnabled = remote.shuffleEnabled
                 repeatMode = RepeatMode.valueOf(remote.repeatMode)
                 applyRepeatMode()
-                kotlinx.coroutines.withTimeout(20_000) {
-                    while (player.playbackState != Player.STATE_READY ||
-                        player.currentMediaItem?.mediaId?.removePrefix("yt_") != track.id.toString()) {
-                        player.playerError?.let { throw IllegalStateException("Unable to prepare this track", it) }
-                        kotlinx.coroutines.delay(100)
-                    }
-                }
+                com.alananasss.kittytune.data.sync.awaitConnectPreparation(
+                    ready = { player.playbackState == Player.STATE_READY &&
+                        player.currentMediaItem?.mediaId?.removePrefix("yt_") == track.id.toString() },
+                    failure = { player.playerError },
+                    observe = { changed ->
+                        val listener = object : Player.Listener {
+                            override fun onPlaybackStateChanged(playbackState: Int) = changed()
+                            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) = changed()
+                            override fun onPlayerError(error: androidx.media3.common.PlaybackException) = changed()
+                        }
+                        player.addListener(listener)
+                        val remove: () -> Unit = { player.removeListener(listener) }
+                        remove
+                    },
+                )
                 player.seekTo(remote.positionMs)
                 currentPosition = remote.positionMs
             }
@@ -5398,7 +5407,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         if (isRestoringSession) return
         ConnectManager.publish(connectSnapshot())
         if (syncPlaybackReady) {
-            val q = queueState.toList()
+            val q = queueState
             val index = q.indexOfFirst { it.id == currentTrack?.id }
             if (index >= 0) {
                 val position = currentPosition

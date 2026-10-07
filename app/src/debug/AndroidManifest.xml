@@ -1,0 +1,8 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- ADB diagnostics only; neither this provider nor its permission exists in release builds. -->
+        <provider android:name="com.alananasss.kittytune.data.sync.ConnectDiagnosticsProvider"
+            android:authorities="${applicationId}.connect.diagnostics" android:exported="true"
+            android:permission="android.permission.DUMP" />
+    </application>
+</manifest>

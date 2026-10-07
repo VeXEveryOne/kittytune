@@ -4,6 +4,9 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.LinkProperties
+import android.os.Handler
+import android.os.Looper
 import com.alananasss.kittytune.KittyTuneApp
 
 internal object ConnectPlatform {
@@ -43,29 +46,85 @@ internal object ConnectPlatform {
     fun relayEndpoint() = relayUrl
     fun startListener() {} // Android uses one outbound duplex connection, including for receiving commands.
     private val connectivity by lazy { KittyTuneApp.instance.getSystemService(ConnectivityManager::class.java) }
-    private var networkCallback: ConnectivityManager.NetworkCallback? = null
-    fun canUseLan(): Boolean = connectivity?.activeNetwork?.let { connectivity?.getNetworkCapabilities(it) }?.let {
-        it.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || it.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
-    } == true
+    @Volatile private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private val networkState = ConnectNetworkState<Network>()
+    private val networkHandler = Handler(Looper.getMainLooper())
+    fun canUseLan() = networkState.route?.capabilities?.lan == true
+    fun canConnect() = networkState.route != null
+
+    /** Bind both DNS and sockets to the announced route, never the previous default network. */
+    fun routeClient(client: okhttp3.OkHttpClient): okhttp3.OkHttpClient? {
+        val network = networkState.route?.network ?: return null
+        return client.newBuilder().socketFactory(network.socketFactory)
+            .dns { host -> network.getAllByName(host).toList() }.build()
+    }
+
+    private fun capabilities(value: NetworkCapabilities) = ConnectNetworkState.Capabilities(
+        transports = listOf(NetworkCapabilities.TRANSPORT_CELLULAR, NetworkCapabilities.TRANSPORT_WIFI,
+            NetworkCapabilities.TRANSPORT_ETHERNET, NetworkCapabilities.TRANSPORT_VPN,
+            NetworkCapabilities.TRANSPORT_BLUETOOTH).fold(0) { mask, transport ->
+            if (value.hasTransport(transport)) mask or (1 shl transport) else mask
+        },
+        lan = value.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || value.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET),
+        internet = value.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+            value.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED),
+    )
+    private fun properties(value: LinkProperties) = listOf(value.interfaceName,
+        value.linkAddresses.map { it.toString() }.sorted(), value.dnsServers.map { it.hostAddress }.sorted(),
+        value.routes.map { it.toString() }.sorted(), value.httpProxy?.toString()).joinToString("|")
     @Synchronized
     fun setActive(value: Boolean) {
         if (value) {
             SyncScheduler.start(); SyncService.startIfWanted()
             if (networkCallback == null) {
                 val callback = object : ConnectivityManager.NetworkCallback() {
-                    private var current = connectivity?.activeNetwork
+                    private val reconnect = Runnable {
+                        if (networkCallback === this) ConnectManager.networkChanged()
+                    }
+                    private fun changed(value: Boolean) {
+                        // Invoked on main, outside the platform/state locks. Ignore callbacks after unregister.
+                        if (value && networkCallback === this) {
+                            trace("network route ${if (canUseLan()) "LAN" else if (canConnect()) "Internet" else "unavailable"}")
+                            networkHandler.removeCallbacks(reconnect)
+                            if (!canConnect()) ConnectManager.networkChanged()
+                            else {
+                                // Android delivers route/capability changes in a short burst. Dial once after it settles.
+                                networkHandler.postDelayed(reconnect, 150)
+                            }
+                        }
+                    }
                     override fun onAvailable(network: Network) {
-                        if (network != current) { current = network; ConnectManager.networkChanged() }
+                        if (networkCallback === this) changed(networkState.available(network))
                     }
                     override fun onLost(network: Network) {
-                        if (network == current) { current = null; ConnectManager.networkChanged() }
+                        if (networkCallback === this) changed(networkState.lost(network))
+                    }
+                    override fun onCapabilitiesChanged(network: Network, value: NetworkCapabilities) {
+                        if (networkCallback === this) changed(networkState.capabilities(network, capabilities(value)))
+                    }
+                    override fun onLinkPropertiesChanged(network: Network, value: LinkProperties) {
+                        if (networkCallback === this) changed(networkState.properties(network, properties(value)))
+                    }
+                    override fun onBlockedStatusChanged(network: Network, blocked: Boolean) {
+                        if (networkCallback === this) changed(networkState.blocked(network, blocked))
                     }
                 }
-                runCatching { connectivity?.registerDefaultNetworkCallback(callback); networkCallback = callback }
+                // Seed once outside callbacks. Subsequent route updates only use callback arguments.
+                networkState.clear()
+                connectivity?.activeNetwork?.let { network ->
+                    networkState.available(network)
+                    connectivity?.getNetworkCapabilities(network)?.let { networkState.capabilities(network, capabilities(it)) }
+                    connectivity?.getLinkProperties(network)?.let { networkState.properties(network, properties(it)) }
+                }
+                runCatching {
+                    networkCallback = callback
+                    connectivity?.registerDefaultNetworkCallback(callback, networkHandler)
+                }.onFailure { networkCallback = null }
             }
         } else {
             networkCallback?.let { runCatching { connectivity?.unregisterNetworkCallback(it) } }
             networkCallback = null
+            networkState.clear()
             SyncScheduler.stop(); SyncService.stop()
         }
     }
